@@ -4,6 +4,20 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    
+    <!-- Self-contained настройки -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    
+    <!-- Оптимизации -->
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    
+    <!-- Важно: osu! обычно 32-битное -->
+    <PlatformTarget>x86</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>
@@ -11,12 +25,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Копирует DLL файлы в выходную папку при сборке -->
-    <Content Include="0Harmony.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="_patcher.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+    <!-- DLL как встроенные ресурсы -->
+    <EmbeddedResource Include="0Harmony.dll" />
+    <EmbeddedResource Include="_patcher.dll" />
   </ItemGroup>
 </Project>
