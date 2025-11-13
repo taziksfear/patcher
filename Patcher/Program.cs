@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Threading;
 using System.Diagnostics;
@@ -7,279 +7,246 @@ using System.Windows.Forms;
 using System.Drawing;
 using HoLLy.ManagedInjector;
 
-namespace patchershit
+namespace SimplePatch
 {
-    internal static class Program
+    internal static class App
     {
-        private static readonly string ConfigPath = Path.GetFullPath("conf.db");
-        private static readonly string DomainConfigPath = Path.GetFullPath("domain.conf");
-        private const string DefaultDomain = "akatsuki.gg";
-        private static readonly string TempDir = Path.Combine(Path.GetTempPath(), "osu_patcher_" + Guid.NewGuid().ToString()[..8]);
+        public static string cfg = Path.GetFullPath("path.txt");
+        public static string tmp = Path.Combine(Path.GetTempPath(), "patch" + Guid.NewGuid().ToString()[..5]);
 
         [STAThread]
-        static void Main()
+                static void Main()
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new Gui());
+        }
+
+        public static void work()
+        {
+            string dom = ask();
+            if (dom == null) return;
+
+            string p = find();
+            if (string.IsNullOrEmpty(p)) return;
+
+            Directory.CreateDirectory(tmp);
+
+            save("0Harmony.dll", tmp);
+            string dll = save("_patcher.dll", tmp);
+
+            var proc = Process.Start(new ProcessStartInfo
+            {
+                FileName = p,
+                Arguments = $"-devserver {dom}",
+                UseShellExecute = false
+            });
             
-            Application.Run(new MainForm());
+            proc.WaitForInputIdle();
+            Thread.Sleep(8000);
+
+            using (var i = new InjectableProcess((uint)proc.Id))
+            {
+                i.Inject(dll, "_patcher.Main", "Initialize");
+            }
+            
+            MessageBox.Show("Готово!", "Инфо", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            clear();
         }
 
-        public static void RunPatcher()
+        public static string? ask()
         {
-            try
+            using var f = new Form()
             {
-                var domain = GetDomain();
-                if (domain == null)
-                {
-                    ShowMessage("Domain selection cancelled.", "Cancelled");
-                    return;
-                }
-
-                var osuPath = GetOsuPath();
-                if (string.IsNullOrEmpty(osuPath))
-                {
-                    ShowMessage("Path selection cancelled.", "Cancelled");
-                    return;
-                }
-
-                Directory.CreateDirectory(TempDir);
-
-                ExtractEmbeddedResource("0Harmony.dll", TempDir);
-                var patcherPath = ExtractEmbeddedResource("_patcher.dll", TempDir);
-
-                var osuProc = Process.Start(new ProcessStartInfo
-                {
-                    FileName = osuPath,
-                    Arguments = $"-devserver {domain}",
-                    UseShellExecute = false
-                });
-                
-                if (osuProc == null)
-                    throw new Exception("Failed to start osu!");
-
-                osuProc.WaitForInputIdle();
-                Thread.Sleep(8000);
-
-                using (var proc = new InjectableProcess((uint)osuProc.Id))
-                    proc.Inject(patcherPath, "_patcher.Main", "Initialize");
-                
-                ShowMessage("Injection completed successfully!", "Success");
-            }
-            catch (Exception e)
-            {
-                ShowMessage($"Error: {e.Message}", "Error", MessageBoxIcon.Error);
-            }
-            finally
-            {
-                CleanupTempFiles();
-            }
-        }
-
-        private static string? GetDomain()
-        {
-            if (File.Exists(DomainConfigPath))
-            {
-                var savedDomain = File.ReadAllText(DomainConfigPath).Trim();
-                if (!string.IsNullOrEmpty(savedDomain))
-                    return savedDomain;
-            }
-
-            using var form = new Form()
-            {
-                Text = "Server Domain",
-                Size = new Size(350, 180),
+                Text = "Сервер",
+                Size = new Size(300, 150),
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 StartPosition = FormStartPosition.CenterScreen,
                 MaximizeBox = false,
-                MinimizeBox = false
+                MinimizeBox = false,
+                BackColor = Color.FromArgb(30, 30, 30),
+                ForeColor = Color.White
             };
 
-            var label = new Label 
+            var l = new Label 
             { 
-                Text = "Enter server domain:", 
-                Location = new Point(20, 20), 
-                Size = new Size(300, 20)
+                Text = "Адрес сервера:", 
+                Location = new Point(10, 10), 
+                Size = new Size(260, 20),
+                ForeColor = Color.White
             };
 
-            var textBox = new TextBox 
+            var t = new TextBox 
             { 
-                Text = DefaultDomain,
-                Location = new Point(20, 45), 
-                Size = new Size(290, 20)
+                Text = "akatsuki.gg",
+                Location = new Point(10, 35), 
+                Size = new Size(260, 20),
+                BackColor = Color.FromArgb(50, 50, 50),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
             };
 
-            var okButton = new Button 
+            var b1 = new Button 
             { 
-                Text = "OK", 
-                Location = new Point(150, 80), 
-                Size = new Size(75, 30),
-                DialogResult = DialogResult.OK
+                Text = "Ок", 
+                Location = new Point(110, 70), 
+                                Size = new Size(70, 25),
+                DialogResult = DialogResult.OK,
+                BackColor = Color.FromArgb(60, 60, 60),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
             };
+            b1.FlatAppearance.BorderSize = 0;
 
-            var cancelButton = new Button 
+            var b2 = new Button 
             { 
-                Text = "Cancel", 
-                Location = new Point(235, 80), 
-                Size = new Size(75, 30),
-                DialogResult = DialogResult.Cancel
+                Text = "Отмена", 
+                Location = new Point(190, 70), 
+                Size = new Size(70, 25),
+                DialogResult = DialogResult.Cancel,
+                BackColor = Color.FromArgb(60, 60, 60),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
             };
+            b2.FlatAppearance.BorderSize = 0;
 
-            form.Controls.AddRange(new Control[] { label, textBox, okButton, cancelButton });
-            form.AcceptButton = okButton;
-            form.CancelButton = cancelButton;
+            f.Controls.AddRange(new Control[] { l, t, b1, b2 });
+            f.AcceptButton = b1;
+            f.CancelButton = b2;
 
-            textBox.SelectAll();
-            textBox.Focus();
-
-            if (form.ShowDialog() == DialogResult.OK)
+            if (f.ShowDialog() == DialogResult.OK)
             {
-                var domain = string.IsNullOrEmpty(textBox.Text.Trim()) ? DefaultDomain : textBox.Text.Trim();
-                File.WriteAllText(DomainConfigPath, domain);
-                return domain;
+                return string.IsNullOrEmpty(t.Text) ? "akatsuki.gg" : t.Text;
             }
 
             return null;
         }
 
-        private static string? GetOsuPath()
+        public static string? find()
         {
-            if (File.Exists(ConfigPath))
+                        if (File.Exists(cfg))
             {
-                var savedPath = File.ReadAllText(ConfigPath).Trim();
-                if (File.Exists(savedPath))
-                    return savedPath;
+                string s = File.ReadAllText(cfg);
+                if (File.Exists(s)) return s;
             }
 
-            using var openFileDialog = new OpenFileDialog
+            using var d = new OpenFileDialog
             {
-                Filter = "osu! executable (osu!.exe)|osu!.exe",
-                Title = "Select osu!.exe",
-                CheckFileExists = true,
-                CheckPathExists = true,
+                Filter = "Exe файлы|*.exe",
+                Title = "Где osu!.exe?",
                 FileName = "osu!.exe"
             };
 
-            return openFileDialog.ShowDialog() == DialogResult.OK ? openFileDialog.FileName : null;
-        }
-        
-        private static string ExtractEmbeddedResource(string resourceName, string outputDirectory)
-        {
-            var outputPath = Path.Combine(outputDirectory, resourceName);
-            var assembly = Assembly.GetExecutingAssembly();
-            
-            var resourceStream = assembly.GetManifestResourceStream($"{assembly.GetName().Name}.{resourceName}") 
-                              ?? assembly.GetManifestResourceStream(resourceName);
-            
-            if (resourceStream == null)
-                throw new FileNotFoundException($"Resource {resourceName} not found");
-            
-            using (resourceStream)
-            using (var fileStream = File.Create(outputPath))
+            if (d.ShowDialog() == DialogResult.OK)
             {
-                resourceStream.CopyTo(fileStream);
+                File.WriteAllText(cfg, d.FileName);
+                return d.FileName;
             }
-            
-            return outputPath;
-        }
-        
-        private static void CleanupTempFiles()
-        {
-            try
-            {
-                if (Directory.Exists(TempDir))
-                {
-                    Thread.Sleep(1000);
-                    Directory.Delete(TempDir, true);
-                }
-            }
-            catch { /* ignored */ }
-        }
 
-        private static void ShowMessage(string message, string title, MessageBoxIcon icon = MessageBoxIcon.Information)
+            return null;
+        }
+        
+        public static string save(string name, string dir)
         {
-            MessageBox.Show(message, title, MessageBoxButtons.OK, icon);
+            string outpath = Path.Combine(dir, name);
+            var asm = Assembly.GetExecutingAssembly();
+            
+            var stream = asm.GetManifestResourceStream($"{asm.GetName().Name}.{name}") 
+                       ?? asm.GetManifestResourceStream(name);
+            
+            using (stream)
+            using (var fs = File.Create(outpath))
+            {
+                stream.CopyTo(fs);
+            }
+            
+            return outpath;
+        }
+        
+        public static void clear()
+        {
+                        if (Directory.Exists(tmp))
+            {
+                Thread.Sleep(1000);
+                Directory.Delete(tmp, true);
+            }
         }
     }
 
-    public class MainForm : Form
+    public class Gui : Form
     {
-        private Button startButton;
-        private Label statusLabel;
+        Button btn;
+        Label lbl;
 
-        public MainForm()
+        public Gui()
         {
-            InitializeComponent();
+            init();
         }
 
-        private void InitializeComponent()
+        void init()
         {
-            this.Text = "osu! Patcher";
-            this.Size = new Size(400, 200);
-            this.StartPosition = FormStartPosition.CenterScreen;
-            this.FormBorderStyle = FormBorderStyle.FixedDialog;
-            this.MaximizeBox = false;
-            this.MinimizeBox = false;
+            Text = "патчер";
+            Size = new Size(350, 180);
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            BackColor = Color.FromArgb(30, 30, 30);
+            ForeColor = Color.White;
 
-            this.BackColor = Color.FromArgb(15, 15, 15);
-            this.ForeColor = Color.White;
-
-            var titleLabel = new Label
+            var l1 = new Label
             {
-                Text = "osu! Patcher",
-                Font = new Font("Arial", 14, FontStyle.Bold),
-                Location = new Point(20, 20),
+                Text = "патчер",
+                Font = new Font("Arial", 16, FontStyle.Bold),
+                Location = new Point(0, 20),
                 Size = new Size(350, 30),
                 TextAlign = ContentAlignment.MiddleCenter,
-
-                ForeColor = Color.White,
-                BackColor = Color.Transparent
+                ForeColor = Color.White
             };
 
-            statusLabel = new Label
+            lbl = new Label
             {
-                Text = "Click Start to begin patching",
-                Location = new Point(20, 70),
+                Text = "Нажми кнопку",
+                Location = new Point(0, 60),
                 Size = new Size(350, 20),
                 TextAlign = ContentAlignment.MiddleCenter,
-
-                ForeColor = Color.White,
-                BackColor = Color.Transparent
+                ForeColor = Color.LightGray
             };
 
-            startButton = new Button
+            btn = new Button
             {
-                Text = "Start",
-                Location = new Point(150, 110),
+                Text = "начать",
+                Location = new Point(125, 90),
                 Size = new Size(100, 30),
-                Font = new Font("Arial", 10, FontStyle.Bold),
-
-                BackColor = Color.Transparent,
+                BackColor = Color.FromArgb(60, 60, 60),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat
             };
-            startButton.Click += StartButton_Click;
+            btn.FlatAppearance.BorderSize = 0;
+            btn.Click += click;
 
-            this.Controls.AddRange(new Control[] { titleLabel, statusLabel, startButton });
+            Controls.Add(l1);
+            Controls.Add(lbl);
+            Controls.Add(btn);
         }
 
-        private void StartButton_Click(object? sender, EventArgs e)
+        void click(object? s, EventArgs e)
         {
-            startButton.Enabled = false;
-            statusLabel.Text = "Starting...";
-
-            var thread = new Thread(() =>
+            btn.Enabled = false;
+            lbl.Text = "запуск...";
+            
+            var t = new Thread(() =>
             {
-                Program.RunPatcher();
-                this.Invoke(new Action(() =>
+                App.work();
+                Invoke(new Action(() =>
                 {
-                    startButton.Enabled = true;
-                    statusLabel.Text = "Process completed";
+                    btn.Enabled = true;
+                    lbl.Text = "запущено";
                 }));
             });
-            
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
         }
     }
 }
