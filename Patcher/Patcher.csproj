@@ -1,23 +1,18 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     
-    <!-- Self-contained настройки -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x86</RuntimeIdentifier>
     <PublishReadyToRun>true</PublishReadyToRun>
-    
-    <!-- Оптимизации -->
-    <DebugType>embedded</DebugType>
-    <DebugSymbols>true</DebugSymbols>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    
-    <!-- Важно: osu! обычно 32-битное -->
     <PlatformTarget>x86</PlatformTarget>
+    
+    <UseWindowsForms>true</UseWindowsForms>
+
   </PropertyGroup>
 
   <ItemGroup>
@@ -25,7 +20,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- DLL как встроенные ресурсы -->
     <EmbeddedResource Include="0Harmony.dll" />
     <EmbeddedResource Include="_patcher.dll" />
   </ItemGroup>

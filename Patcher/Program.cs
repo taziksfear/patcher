@@ -1,236 +1,252 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Threading;
 using System.Diagnostics;
 using System.Reflection;
+using System.Windows.Forms;
+using System.Drawing;
 using HoLLy.ManagedInjector;
 
-namespace patchershit
+namespace SimplePatch
 {
-    internal class Program
+    internal static class App
     {
-        private static readonly string ConfigPath = Path.GetFullPath("conf.db");
-        private const string Domain = "akatsuki.gg";
-        private static readonly string TempDir = Path.Combine(Path.GetTempPath(), "osu_patcher_" + Guid.NewGuid().ToString()[..8]);
+        public static string cfg = Path.GetFullPath("path.txt");
+        public static string tmp = Path.Combine(Path.GetTempPath(), "patch" + Guid.NewGuid().ToString()[..5]);
 
-        public static void Main(string[] args)
+        [STAThread]
+                static void Main()
         {
-            try
-            {
-                // Диагностика встроенных ресурсов
-                var assembly = Assembly.GetExecutingAssembly();
-                var resources = assembly.GetManifestResourceNames();
-                Console.WriteLine("Available embedded resources:");
-                foreach (var resource in resources)
-                {
-                    Console.WriteLine($"  - {resource}");
-                }
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new Gui());
+        }
 
-                // Создаем временную директорию
-                Directory.CreateDirectory(TempDir);
-                
-                var osuPath = GetOsuPath();
-                
-                // Извлекаем DLL файлы во временную директорию
-                var harmonyPath = ExtractEmbeddedResource("0Harmony.dll", TempDir);
-                var patcherPath = ExtractEmbeddedResource("_patcher.dll", TempDir);
+        public static void work()
+        {
+            string dom = ask();
+            if (dom == null) return;
 
-                Console.WriteLine($"Extracted DLLs to temporary directory: {TempDir}");
-                Console.WriteLine($"Harmony: {File.Exists(harmonyPath)} ({new FileInfo(harmonyPath).Length} bytes)");
-                Console.WriteLine($"Patcher: {File.Exists(patcherPath)} ({new FileInfo(patcherPath).Length} bytes)");
-                
-                // Запускаем osu!
-                Console.WriteLine($"Starting osu! from: {osuPath}");
-                var osuProc = Process.Start(new ProcessStartInfo
-                {
-                    FileName = osuPath,
-                    Arguments = $"-devserver {Domain}",
-                    UseShellExecute = false
-                });
-                
-                if (osuProc == null)
-                    throw new Exception("failed to start osu!");
-                
-                Console.WriteLine($"osu! started with PID: {osuProc.Id}");
-                
-                // Даем процессу больше времени для инициализации
-                Console.WriteLine("Waiting for process to initialize...");
-                osuProc.WaitForInputIdle();
-                
-                // Ждем подольше для полной инициализации
-                for (int i = 0; i < 10; i++)
-                {
-                    Console.WriteLine($"Waiting... {i + 1}/10 seconds");
-                    Thread.Sleep(1000);
-                    
-                    // Проверяем, что процесс еще жив
-                    if (osuProc.HasExited)
-                    {
-                        Console.WriteLine("osu! process exited prematurely!");
-                        return;
-                    }
-                }
-                
-                Console.WriteLine("Attempting injection...");
-                
-                // Инжектим с обработкой ошибок
-                try
-                {
-                    Console.WriteLine($"Creating InjectableProcess for PID {osuProc.Id}...");
-                    using (var proc = new InjectableProcess((uint)osuProc.Id))
-                    {
-                        Console.WriteLine($"InjectableProcess created successfully");
-                        Console.WriteLine($"Injecting {patcherPath}...");
-                        Console.WriteLine($"Type: _patcher.Main");
-                        Console.WriteLine($"Method: Initialize");
-                        
-                        proc.Inject(patcherPath, "_patcher.Main", "Initialize");
-                    }
-                    Console.WriteLine("Injection completed successfully!");
-                }
-                catch (Exception injectEx)
-                {
-                    Console.WriteLine($"Injection failed with error: {injectEx.GetType().Name}");
-                    Console.WriteLine($"Message: {injectEx.Message}");
-                    Console.WriteLine($"Stack trace: {injectEx.StackTrace}");
-                    
-                    // Дополнительная диагностика
-                    if (injectEx.InnerException != null)
-                    {
-                        Console.WriteLine($"Inner exception: {injectEx.InnerException.GetType().Name}");
-                        Console.WriteLine($"Inner message: {injectEx.InnerException.Message}");
-                    }
-                    
-                    throw;
-                }
-                
-                // Даем время для работы инжектированного кода
-                Console.WriteLine("Waiting for injected code to execute...");
-                Thread.Sleep(3000);
-                
-                Console.WriteLine("Process completed successfully!");
-            }
-            catch (Exception e)
+            string p = find();
+            if (string.IsNullOrEmpty(p)) return;
+
+            Directory.CreateDirectory(tmp);
+
+            save("0Harmony.dll", tmp);
+            string dll = save("_patcher.dll", tmp);
+
+            var proc = Process.Start(new ProcessStartInfo
             {
-                Console.Error.WriteLine($"Critical error: {e.GetType().Name}");
-                Console.Error.WriteLine($"Message: {e.Message}");
-                Console.Error.WriteLine($"Stack trace: {e.StackTrace}");
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
-            }
-            finally
+                FileName = p,
+                Arguments = $"-devserver {dom}",
+                UseShellExecute = false
+            });
+            
+            proc.WaitForInputIdle();
+            Thread.Sleep(8000);
+
+            using (var i = new InjectableProcess((uint)proc.Id))
             {
-                // Очищаем временные файлы
-                CleanupTempFiles();
+                i.Inject(dll, "_patcher.Main", "Initialize");
             }
+            
+            MessageBox.Show("Готово!", "Инфо", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            clear();
+        }
+
+        public static string? ask()
+        {
+            using var f = new Form()
+            {
+                Text = "Сервер",
+                Size = new Size(300, 150),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterScreen,
+                MaximizeBox = false,
+                MinimizeBox = false,
+                BackColor = Color.FromArgb(30, 30, 30),
+                ForeColor = Color.White
+            };
+
+            var l = new Label 
+            { 
+                Text = "Адрес сервера:", 
+                Location = new Point(10, 10), 
+                Size = new Size(260, 20),
+                ForeColor = Color.White
+            };
+
+            var t = new TextBox 
+            { 
+                Text = "akatsuki.gg",
+                Location = new Point(10, 35), 
+                Size = new Size(260, 20),
+                BackColor = Color.FromArgb(50, 50, 50),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            var b1 = new Button 
+            { 
+                Text = "Ок", 
+                Location = new Point(110, 70), 
+                                Size = new Size(70, 25),
+                DialogResult = DialogResult.OK,
+                BackColor = Color.FromArgb(60, 60, 60),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            b1.FlatAppearance.BorderSize = 0;
+
+            var b2 = new Button 
+            { 
+                Text = "Отмена", 
+                Location = new Point(190, 70), 
+                Size = new Size(70, 25),
+                DialogResult = DialogResult.Cancel,
+                BackColor = Color.FromArgb(60, 60, 60),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            b2.FlatAppearance.BorderSize = 0;
+
+            f.Controls.AddRange(new Control[] { l, t, b1, b2 });
+            f.AcceptButton = b1;
+            f.CancelButton = b2;
+
+            if (f.ShowDialog() == DialogResult.OK)
+            {
+                return string.IsNullOrEmpty(t.Text) ? "akatsuki.gg" : t.Text;
+            }
+
+            return null;
+        }
+
+        public static string? find()
+        {
+                        if (File.Exists(cfg))
+            {
+                string s = File.ReadAllText(cfg);
+                if (File.Exists(s)) return s;
+            }
+
+            using var d = new OpenFileDialog
+            {
+                Filter = "Exe файлы|*.exe",
+                Title = "Где osu!.exe?",
+                FileName = "osu!.exe"
+            };
+
+            if (d.ShowDialog() == DialogResult.OK)
+            {
+                File.WriteAllText(cfg, d.FileName);
+                return d.FileName;
+            }
+
+            return null;
         }
         
-        private static string ExtractEmbeddedResource(string resourceName, string outputDirectory)
+        public static string save(string name, string dir)
         {
-            var outputPath = Path.Combine(outputDirectory, resourceName);
+            string outpath = Path.Combine(dir, name);
+            var asm = Assembly.GetExecutingAssembly();
             
-            // Получаем assembly и ищем ресурс
-            var assembly = Assembly.GetExecutingAssembly();
-            var resourceStream = assembly.GetManifestResourceStream($"{assembly.GetName().Name}.{resourceName}");
+            var stream = asm.GetManifestResourceStream($"{asm.GetName().Name}.{name}") 
+                       ?? asm.GetManifestResourceStream(name);
             
-            if (resourceStream == null)
+            using (stream)
+            using (var fs = File.Create(outpath))
             {
-                // Пробуем найти ресурс без namespace
-                var resources = assembly.GetManifestResourceNames();
-                foreach (var res in resources)
-                {
-                    if (res.EndsWith("." + resourceName) || res == resourceName)
-                    {
-                        resourceStream = assembly.GetManifestResourceStream(res);
-                        break;
-                    }
-                }
-                
-                if (resourceStream == null)
-                    throw new FileNotFoundException($"Embedded resource {resourceName} not found. Available resources: {string.Join(", ", resources)}");
+                stream.CopyTo(fs);
             }
             
-            using (resourceStream)
-            using (var fileStream = File.Create(outputPath))
-            {
-                resourceStream.CopyTo(fileStream);
-            }
-            
-            return outputPath;
+            return outpath;
         }
         
-        private static void CleanupTempFiles()
+        public static void clear()
         {
-            try
+                        if (Directory.Exists(tmp))
             {
-                if (Directory.Exists(TempDir))
-                {
-                    // Даем время для освобождения DLL файлов
-                    Thread.Sleep(1000);
-                    Directory.Delete(TempDir, true);
-                    Console.WriteLine($"Cleaned up temporary directory: {TempDir}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Warning: Could not clean up temporary files: {ex.Message}");
+                Thread.Sleep(1000);
+                Directory.Delete(tmp, true);
             }
         }
-        
-        private static string GetOsuPath()
+    }
+
+    public class Gui : Form
+    {
+        Button btn;
+        Label lbl;
+
+        public Gui()
         {
-            // Без изменений
-            if (File.Exists(ConfigPath))
+            init();
+        }
+
+        void init()
+        {
+            Text = "патчер";
+            Size = new Size(350, 180);
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            BackColor = Color.FromArgb(30, 30, 30);
+            ForeColor = Color.White;
+
+            var l1 = new Label
             {
-                var savedPath = File.ReadAllText(ConfigPath).Trim();
-                if (File.Exists(savedPath))
-                    return savedPath;
+                Text = "патчер",
+                Font = new Font("Arial", 16, FontStyle.Bold),
+                Location = new Point(0, 20),
+                Size = new Size(350, 30),
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.White
+            };
 
-                Console.WriteLine("saved osu! path not found, re-entering...");
-            }
-
-            Console.Write("enter path to osu! folder (ex: D:\\osu!): ");
-            var inputPath = Console.ReadLine()?.Trim('"').Trim();
-
-            if (string.IsNullOrWhiteSpace(inputPath))
-                throw new FileNotFoundException("Path cannot be empty");
-
-            string fullPath;
-            if (inputPath.EndsWith("osu!.exe", StringComparison.OrdinalIgnoreCase))
+            lbl = new Label
             {
-                fullPath = inputPath;
-            }
-            else
+                Text = "Нажми кнопку",
+                Location = new Point(0, 60),
+                Size = new Size(350, 20),
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.LightGray
+            };
+
+            btn = new Button
             {
-                fullPath = Path.Combine(inputPath.TrimEnd('\\', '/'), "osu!.exe");
-            }
+                Text = "начать",
+                Location = new Point(125, 90),
+                Size = new Size(100, 30),
+                BackColor = Color.FromArgb(60, 60, 60),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            btn.Click += click;
 
-            if (!File.Exists(fullPath))
-            {
-                var alternativePaths = new[]
-                {
-                    Path.Combine(inputPath, "osu!.exe"),
-                    inputPath + "\\osu!.exe",
-                    inputPath + "//osu!.exe"
-                };
+            Controls.Add(l1);
+            Controls.Add(lbl);
+            Controls.Add(btn);
+        }
 
-                foreach (var altPath in alternativePaths)
-                {
-                    if (File.Exists(altPath))
-                    {
-                        fullPath = altPath;
-                        break;
-                    }
-                }
-            }
-
-            if (!File.Exists(fullPath))
-                throw new FileNotFoundException("osu!.exe not found at: " + fullPath);
-
-            Console.WriteLine($"Using osu! path: {fullPath}");
-            File.WriteAllText(ConfigPath, fullPath);
+        void click(object? s, EventArgs e)
+        {
+            btn.Enabled = false;
+            lbl.Text = "запуск...";
             
-            return fullPath;
+            var t = new Thread(() =>
+            {
+                App.work();
+                Invoke(new Action(() =>
+                {
+                    btn.Enabled = true;
+                    lbl.Text = "запущено";
+                }));
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
         }
     }
 }
