@@ -3,234 +3,152 @@ using System.IO;
 using System.Threading;
 using System.Diagnostics;
 using System.Reflection;
+using System.Collections.Generic;
 using HoLLy.ManagedInjector;
 
-namespace patchershit
+namespace osu_patcher
 {
-    internal class Program
+    internal class App
     {
-        private static readonly string ConfigPath = Path.GetFullPath("conf.db");
-        private const string Domain = "akatsuki.gg";
-        private static readonly string TempDir = Path.Combine(Path.GetTempPath(), "osu_patcher_" + Guid.NewGuid().ToString()[..8]);
+        private static readonly string tmpdir = Path.Combine(Path.GetTempPath(), "osu_patcher_" + Guid.NewGuid().ToString()[..8]);
 
         public static void Main(string[] args)
         {
             try
             {
-                // Диагностика встроенных ресурсов
-                var assembly = Assembly.GetExecutingAssembly();
-                var resources = assembly.GetManifestResourceNames();
-                Console.WriteLine("Available embedded resources:");
-                foreach (var resource in resources)
+                string curdir = AppDomain.CurrentDomain.BaseDirectory;
+                string gamedir = Path.Combine(curdir, "real_osu");
+                string game_exe = Path.Combine(gamedir, "osu!.exe");
+
+                if (!File.Exists(game_exe))
                 {
-                    Console.WriteLine($"  - {resource}");
+                    Console.WriteLine($"[!] Error: can't find {game_exe}");
+                    Console.ReadLine();
+                    return;
                 }
 
-                // Создаем временную директорию
-                Directory.CreateDirectory(TempDir);
-                
-                var osuPath = GetOsuPath();
-                
-                // Извлекаем DLL файлы во временную директорию
-                var harmonyPath = ExtractEmbeddedResource("0Harmony.dll", TempDir);
-                var patcherPath = ExtractEmbeddedResource("_patcher.dll", TempDir);
+                string srv_file = Path.Combine(curdir, "server.txt");
+                string srv = "";
 
-                Console.WriteLine($"Extracted DLLs to temporary directory: {TempDir}");
-                Console.WriteLine($"Harmony: {File.Exists(harmonyPath)} ({new FileInfo(harmonyPath).Length} bytes)");
-                Console.WriteLine($"Patcher: {File.Exists(patcherPath)} ({new FileInfo(patcherPath).Length} bytes)");
-                
-                // Запускаем osu!
-                Console.WriteLine($"Starting osu! from: {osuPath}");
-                var osuProc = Process.Start(new ProcessStartInfo
+                if (File.Exists(srv_file))
                 {
-                    FileName = osuPath,
-                    Arguments = $"-devserver {Domain}",
-                    UseShellExecute = false
-                });
-                
-                if (osuProc == null)
-                    throw new Exception("failed to start osu!");
-                
-                Console.WriteLine($"osu! started with PID: {osuProc.Id}");
-                
-                // Даем процессу больше времени для инициализации
-                Console.WriteLine("Waiting for process to initialize...");
-                osuProc.WaitForInputIdle();
-                
-                // Ждем подольше для полной инициализации
-                for (int i = 0; i < 10; i++)
+                    srv = File.ReadAllText(srv_file).Trim().ToLower();
+                    File.Delete(srv_file);
+                }
+
+                bool is_bancho = string.IsNullOrEmpty(srv) || srv == "bancho";
+
+                var new_args = new List<string>();
+                for (int i = 0; i < args.Length; i++)
                 {
-                    Console.WriteLine($"Waiting... {i + 1}/10 seconds");
-                    Thread.Sleep(1000);
-                    
-                    // Проверяем, что процесс еще жив
-                    if (osuProc.HasExited)
+                    if (args[i].Equals("-devserver", StringComparison.OrdinalIgnoreCase))
                     {
-                        Console.WriteLine("osu! process exited prematurely!");
-                        return;
+                        i++;
+                        continue;
                     }
+                    
+                    if (args[i].Contains(" "))
+                        new_args.Add($"\"{args[i]}\"");
+                    else
+                        new_args.Add(args[i]);
                 }
+
+                string final_args = string.Join(" ", new_args);
                 
-                Console.WriteLine("Attempting injection...");
+                if (!is_bancho)
+                {
+                    final_args += string.IsNullOrEmpty(final_args) ? $"-devserver {srv}" : $" -devserver {srv}";
+                    Console.WriteLine($"[INFO] Server: {srv}");
+                }
+                else
+                {
+                    Console.WriteLine("[INFO] Bancho selected. Vanilla mode.");
+                }
+
+                var osu_proc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = game_exe,
+                    Arguments = final_args,
+                    UseShellExecute = false,
+                    WorkingDirectory = gamedir
+                });
+
+                if (osu_proc == null) throw new Exception("Failed to start osu!");
                 
-                // Инжектим с обработкой ошибок
+                if (is_bancho) return; 
+                Directory.CreateDirectory(tmpdir);
+                var harm_dll = Unpack("0Harmony.dll", tmpdir);
+                var patch_dll = Unpack("_patcher.dll", tmpdir);
+
+                for (int i = 0; i < 7; i++)
+                {
+                    Thread.Sleep(1000);
+                    osu_proc.Refresh();
+                    if (osu_proc.HasExited) return;
+                }
                 try
                 {
-                    Console.WriteLine($"Creating InjectableProcess for PID {osuProc.Id}...");
-                    using (var proc = new InjectableProcess((uint)osuProc.Id))
+                    using (var p = new InjectableProcess((uint)osu_proc.Id))
                     {
-                        Console.WriteLine($"InjectableProcess created successfully");
-                        Console.WriteLine($"Injecting {patcherPath}...");
-                        Console.WriteLine($"Type: _patcher.Main");
-                        Console.WriteLine($"Method: Initialize");
-                        
-                        proc.Inject(patcherPath, "_patcher.Main", "Initialize");
+                        p.Inject(patch_dll, "_patcher.Main", "Initialize");
                     }
-                    Console.WriteLine("Injection completed successfully!");
+                    Console.WriteLine(">>> INJECTED! <<<");
                 }
-                catch (Exception injectEx)
+                catch (Exception ex)
                 {
-                    Console.WriteLine($"Injection failed with error: {injectEx.GetType().Name}");
-                    Console.WriteLine($"Message: {injectEx.Message}");
-                    Console.WriteLine($"Stack trace: {injectEx.StackTrace}");
-                    
-                    // Дополнительная диагностика
-                    if (injectEx.InnerException != null)
-                    {
-                        Console.WriteLine($"Inner exception: {injectEx.InnerException.GetType().Name}");
-                        Console.WriteLine($"Inner message: {injectEx.InnerException.Message}");
-                    }
-                    
-                    throw;
+                    Console.WriteLine($"[!] Inject error: {ex.Message}");
                 }
                 
-                // Даем время для работы инжектированного кода
-                Console.WriteLine("Waiting for injected code to execute...");
                 Thread.Sleep(3000);
-                
-                Console.WriteLine("Process completed successfully!");
             }
             catch (Exception e)
             {
-                Console.Error.WriteLine($"Critical error: {e.GetType().Name}");
-                Console.Error.WriteLine($"Message: {e.Message}");
-                Console.Error.WriteLine($"Stack trace: {e.StackTrace}");
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
+                Console.WriteLine($"[!] Crash: {e.Message}");
+                Console.ReadLine();
             }
             finally
             {
-                // Очищаем временные файлы
-                CleanupTempFiles();
+                CleanTmp();
             }
         }
-        
-        private static string ExtractEmbeddedResource(string resourceName, string outputDirectory)
+        private static string Unpack(string resName, string outDir)
         {
-            var outputPath = Path.Combine(outputDirectory, resourceName);
+            var outPath = Path.Combine(outDir, resName);
+            var asm = Assembly.GetExecutingAssembly();
+            var stream = asm.GetManifestResourceStream($"{asm.GetName().Name}.{resName}");
             
-            // Получаем assembly и ищем ресурс
-            var assembly = Assembly.GetExecutingAssembly();
-            var resourceStream = assembly.GetManifestResourceStream($"{assembly.GetName().Name}.{resourceName}");
-            
-            if (resourceStream == null)
+            if (stream == null)
             {
-                // Пробуем найти ресурс без namespace
-                var resources = assembly.GetManifestResourceNames();
-                foreach (var res in resources)
+                var all_res = asm.GetManifestResourceNames();
+                foreach (var r in all_res)
                 {
-                    if (res.EndsWith("." + resourceName) || res == resourceName)
+                    if (r.EndsWith("." + resName) || r == resName)
                     {
-                        resourceStream = assembly.GetManifestResourceStream(res);
+                        stream = asm.GetManifestResourceStream(r);
                         break;
                     }
                 }
-                
-                if (resourceStream == null)
-                    throw new FileNotFoundException($"Embedded resource {resourceName} not found. Available resources: {string.Join(", ", resources)}");
+                if (stream == null) throw new FileNotFoundException($"Resource {resName} missing.");
             }
             
-            using (resourceStream)
-            using (var fileStream = File.Create(outputPath))
+            using (stream)
+            using (var fs = File.Create(outPath))
             {
-                resourceStream.CopyTo(fileStream);
+                stream.CopyTo(fs);
             }
-            
-            return outputPath;
+            return outPath;
         }
-        
-        private static void CleanupTempFiles()
+        private static void CleanTmp()
         {
             try
             {
-                if (Directory.Exists(TempDir))
+                if (Directory.Exists(tmpdir))
                 {
-                    // Даем время для освобождения DLL файлов
                     Thread.Sleep(1000);
-                    Directory.Delete(TempDir, true);
-                    Console.WriteLine($"Cleaned up temporary directory: {TempDir}");
+                    Directory.Delete(tmpdir, true);
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Warning: Could not clean up temporary files: {ex.Message}");
-            }
-        }
-        
-        private static string GetOsuPath()
-        {
-            // Без изменений
-            if (File.Exists(ConfigPath))
-            {
-                var savedPath = File.ReadAllText(ConfigPath).Trim();
-                if (File.Exists(savedPath))
-                    return savedPath;
-
-                Console.WriteLine("saved osu! path not found, re-entering...");
-            }
-
-            Console.Write("enter path to osu! folder (ex: D:\\osu!): ");
-            var inputPath = Console.ReadLine()?.Trim('"').Trim();
-
-            if (string.IsNullOrWhiteSpace(inputPath))
-                throw new FileNotFoundException("Path cannot be empty");
-
-            string fullPath;
-            if (inputPath.EndsWith("osu!.exe", StringComparison.OrdinalIgnoreCase))
-            {
-                fullPath = inputPath;
-            }
-            else
-            {
-                fullPath = Path.Combine(inputPath.TrimEnd('\\', '/'), "osu!.exe");
-            }
-
-            if (!File.Exists(fullPath))
-            {
-                var alternativePaths = new[]
-                {
-                    Path.Combine(inputPath, "osu!.exe"),
-                    inputPath + "\\osu!.exe",
-                    inputPath + "//osu!.exe"
-                };
-
-                foreach (var altPath in alternativePaths)
-                {
-                    if (File.Exists(altPath))
-                    {
-                        fullPath = altPath;
-                        break;
-                    }
-                }
-            }
-
-            if (!File.Exists(fullPath))
-                throw new FileNotFoundException("osu!.exe not found at: " + fullPath);
-
-            Console.WriteLine($"Using osu! path: {fullPath}");
-            File.WriteAllText(ConfigPath, fullPath);
-            
-            return fullPath;
+            catch { }
         }
     }
 }

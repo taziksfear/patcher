@@ -1,52 +1,38 @@
 [EN]
-well, i did ( stole tones code from re;fx ) new patcher for akatsuki for ppl from russia and countries where official akatsuki patcher stop works.
-reasons:
-1. I WANNA PLAY WITH RELAX MISSES
-2. other wants to play with relax misses
-3. 3rd party patchers dont work atleast for me
 
-hope you'll enjoy this
+holy... read this be4 saying: it isnt work for me bradar. 
 
-How to start: 
-~~1. download this repository~~
-~~2. open cmd and write following commands~~
-~~3. ```cd patcher ```~~
-~~4. ```dotnet build```~~
-~~5. go to ``` C:\downoads\patcher\Patcher\bin\Release\net9.0\win-x64 ```~~
-~~6. open patcher.exe~~
-~~7. enjoy~~
+to start using this you need to:
+1. osu_launcher.sh ( you can bind it idrc )
+2. osu!.exe from latest release (NOT ORIGINAL ONE, BUT MINE !!!!!!!)
+3. write chmod +x ./osu_launcher.sh in folder where this script
+4. go to your osu-wine dir ( default is: ~/.local/share/osu-wine/osu!/)
+5. create real_osu directory
+6. put everything from osu-wine dir to real_osu folder
+7. put my osu!.exe ( from latest release ) to osu-wine dir ( default is: ~/.local/share/osu-wine/osu!/).
+# NOTICE
+DOWNLOAD ZENITY ```sudo pacman -S zenity ``` but ig you already got this cuz you need to downlaod this for osu-winello
 
-just download latest release version :fire:
+thats all!!! now just open osu_launcher.sh and choose server you want to play ( it wont inject if you joining bancho, dont worry )
 
-ToDo list:
 
-1. normal ui
-2. own icon
-3. linux support
-
+or just run auto.sh :tf: (```chmod +x ./auto.sh && ./auto.sh ``` or it wont work)
 [RU]
 
-короче, решил я написать ( украсть чужой код у re;fx (адаптироаввть)) новый патчер для акатсуки так как в россии он перестал работать да и мб в других странах.
-причины: 
-1. я хочу миссы в релаксе
-2. другие тоже хотят миссы в релаксе
-3. почему то другие патчеры не работают
+прости, господи, господи, прости... прочитай это, прежде чем писать: "у меня ниче не работает" и начинать плакать мне в дм. 
 
-надеюсь тебе понравится
+все что тебе нужно это:
+1. osu_launcher.sh (можешь забиндить, мidc)
+2. osu!.exe из последнего релиза ( не оригинальны, а именно мой)
+3. прописать chmod +x ./osu_launcher.sh в папке, где лежит этот скрипт ( сделать его исполняемым )
+4. зайти в свою папку osu-wine (по дефолту это: ~/.local/share/osu-wine/osu!/)
+5. создать там папку real_osu
+6. переместить вообще всё оттуда в папку real_osu
+7. закинуть мой osu!.exe (!!!!!!из последнего релиза!!!!!!) обратно в корень папки osu-wine ( по дефолту это: ~/.local/share/osu-wine/osu!/) .
+# ОБРАТИ ВНИМАНИЕ
+СКАЧАЙ ZENITY ```sudo pacman -S zenity``` думаю он у тебя есть так как его требует osu-winello 
 
-Как запустить:
-~~1. скачай репозиторий~~
-~~2. открой консоль и пиши следующие команды~~
-~~3. ```cd patcher ```~~
-~~4. ```dotnet build```~~
-~~5. перейди в папку ``` C:\downoads\patcher\Patcher\bin\Release\net9.0\win-x64 ```~~
-~~6. открой patcher.exe~~
-~~7. наслаждайся~~
+вот и всё!!! теперь просто открывай osu_launcher.sh и выбирай сервер, на котором хочешь играть (если выберешь bancho, инжекта не будет, не переживай)
 
-просто скачай последнюю версию релиза :fire:
 
-ToDo list:
-
-1. нормальный интерфейс
-2. иконка приложения
-3. поддержка линукса
+а, ну или запустить auto.sh :tf: (```chmod +x ./auto.sh && ./auto.sh``` или он не заработает)
