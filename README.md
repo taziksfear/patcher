@@ -17,6 +17,7 @@ thats all!!! now just open osu_launcher.sh and choose server you want to play ( 
 
 
 or just run auto.sh :tf: (```chmod +x ./auto.sh && ./auto.sh ``` or it wont work)
+
 [RU]
 
 прости, господи, господи, прости... прочитай это, прежде чем писать: "у меня ниче не работает" и начинать плакать мне в дм. 
