@@ -88,8 +88,8 @@ static gboolean do_headless(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-void start_headless(const char *url, int w, int h,
-                    const char *out_path, const char *module_id) {
+static void start_headless(const char *url, int w, int h,
+                           const char *out_path, const char *module_id) {
     ShotArgs *a   = g_new0(ShotArgs, 1);
     a->url        = strdup(url);
     a->width      = w > 0 ? w : 400;
@@ -153,7 +153,7 @@ static gboolean do_open_browser(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 
-void open_browser(const char *url, int w, int h) {
+static void open_browser(const char *url, int w, int h) {
     OpenArgs *a = g_new0(OpenArgs, 1);
     a->url    = strdup(url);
     a->width  = w > 0 ? w : 1000;
