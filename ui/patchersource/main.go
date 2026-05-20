@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"io"
 	"net/url"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -383,71 +384,97 @@ func buildElementVisual(el *UIElement, isEditMode bool) fyne.CanvasObject {
 		}
 		visual = btnContainer
 
-	case "module":
+	case "module": //TODO: webview fix. add more api patterns for diff servers than akatsuki's one. pre desing for api output
 		bgRect := canvas.NewRectangle(color.NRGBA{
 			R: el.ColorR, G: el.ColorG, B: el.ColorB, A: alpha,
 		})
 		bgRect.CornerRadius = 8
 
 		w, h := el.Width, el.Height
-		if w <= 0 {
-			w = 200
-		}
-		if h <= 0 {
-			h = 80
-		}
+		if w <= 0 { w = 200 }
+		if h <= 0 { h = 80 }
 
 		var modContainer *fyne.Container
 
 		if el.ModuleMode == "url" && el.Endpoint != "" {
-			if !isEditMode {
-				webImg := StartModuleWebView(
-					el.ID, el.Endpoint,
-					int(w), int(h),
-				)
-				webImg.Resize(fyne.NewSize(w, h))
 
-				tap := newTappableContainer(
-					container.NewStack(bgRect, webImg),
-					func() {
-						OpenEmbeddedWebView(el.Endpoint, 1000, 700)
-					},
-				)
+			if !isEditMode {
+				webImg := StartModuleWebView(el.ID, el.Endpoint, int(w), int(h))
+				webImg.Resize(fyne.NewSize(w, h))
+				tap := newTappableContainer(webImg, func() { OpenEmbeddedWebView(el.Endpoint, 1000, 700) })
 				tap.Move(fyne.NewPos(el.X, el.Y))
 				tap.Resize(fyne.NewSize(w, h))
 				return tap
 			}
-
 			hostname := el.Endpoint
 			if u, err := url.Parse(el.Endpoint); err == nil && u.Host != "" {
 				hostname = u.Host
 			}
-			lbl := canvas.NewText("🌐 "+hostname, color.NRGBA{
-				R: el.TextColorR, G: el.TextColorG, B: el.TextColorB, A: 255,
-			})
+			lbl := canvas.NewText(hostname, color.NRGBA{R: el.TextColorR, G: el.TextColorG, B: el.TextColorB, A: 255})
 			lbl.TextSize = 11
 			modContainer = container.NewStack(bgRect, container.NewCenter(lbl))
-
 		} else {
-			label := canvas.NewText("{ "+el.Endpoint+" }", color.NRGBA{
-				R: el.TextColorR, G: el.TextColorG, B: el.TextColorB, A: 255,
-			})
-			label.TextSize = 12
-			modContainer = container.NewStack(bgRect, container.NewCenter(label))
+			textColor := color.NRGBA{R: el.TextColorR, G: el.TextColorG, B: el.TextColorB, A: 255}
 
 			if !isEditMode && el.Endpoint != "" {
-				tap := newTappableContainer(modContainer, func() {
-					handleEndpointClick(el.Endpoint)
-				})
+				label := canvas.NewText("loading", textColor)
+				label.TextSize = 12
+				modContainer = container.NewStack(bgRect, container.NewCenter(label))
+
+				go func(endpoint string, lbl *canvas.Text) {
+					resp, err := http.Get(endpoint)
+					if err != nil {
+						lbl.Text = "Ошибка сети"
+						lbl.Refresh()
+						return
+					}
+					defer resp.Body.Close()
+					type BeatmapData struct {
+						SongName string `json:"song_name"`
+					}
+					type ScoreData struct {
+						PP       float64     `json:"pp"`
+						Accuracy float64     `json:"accuracy"`
+						Rank     string      `json:"rank"`
+						MaxCombo int         `json:"max_combo"`
+						Beatmap  BeatmapData `json:"beatmap"`
+					}
+					type AkatsukiResponse struct {
+						Code   int         `json:"code"`
+						Scores []ScoreData `json:"scores"`
+					}
+
+					var apiRes AkatsukiResponse
+					if err := json.NewDecoder(resp.Body).Decode(&apiRes); err == nil {
+						if apiRes.Code != 200 {
+							lbl.Text = "API Ошибка"
+						} else if len(apiRes.Scores) > 0 {
+							top := apiRes.Scores[0]
+							lbl.Text = fmt.Sprintf("Top: %s | %.0fpp", top.Beatmap.SongName, top.PP)
+						} else {
+							lbl.Text = "no scores"
+						}
+					} else {
+						lbl.Text = "bad API"
+					}
+					lbl.Refresh()
+				}(el.Endpoint, label)
+
+				tap := newTappableContainer(modContainer, func() { handleEndpointClick(el.Endpoint) })
 				tap.Move(fyne.NewPos(el.X, el.Y))
 				tap.Resize(fyne.NewSize(w, h))
 				return tap
+			} else {
+				txt := "{ API: " + el.Endpoint + " }"
+				if el.Endpoint == "" { txt = "{ API: empty}" }
+				label := canvas.NewText(txt, textColor)
+				label.TextSize = 12
+				modContainer = container.NewStack(bgRect, container.NewCenter(label))
 			}
 		}
-
+	
 		visual = modContainer
 	}
-
 	if visual == nil {
 		return nil
 	}
@@ -498,7 +525,7 @@ func handleButtonAction(el *UIElement) {
 		return
 	}
 	if el.Action == "internal://launch" {
-		fmt.Println("[LAUNCHER] Запуск osu!.exe из:", appSettings.GamePath)
+		fmt.Println("(not working rn) launching osu!.exe from:", appSettings.GamePath)
 		return
 	}
 }
@@ -595,7 +622,7 @@ func setInspectorContent(content fyne.CanvasObject) {
 func showPropertiesPanel(el *UIElement) {
 	selectedElement = el
 	if el == nil {
-		setInspectorContent(widget.NewLabel("Выберите элемент на холсте"))
+		setInspectorContent(widget.NewLabel("select element"))
 		return
 	}
 	var items []fyne.CanvasObject
@@ -629,7 +656,7 @@ func buildBackgroundInspector(el *UIElement) []fyne.CanvasObject {
 	if el.Image != "" {
 		imageLabel.SetText(el.Image)
 	}
-	uploadBtn := widget.NewButton("📁 Upload Image...", func() {
+	uploadBtn := widget.NewButton("Upload Image...", func() {
 		fd := dialog.NewFileOpen(func(uc fyne.URIReadCloser, err error) {
 			if err != nil || uc == nil {
 				return
@@ -860,7 +887,7 @@ func showTemplatesPanel() {
 				ID:         nextID("mod"),
 				Type:       "module",
 				Endpoint:   "https://example.com",
-				ModuleMode: "info", // дефолт — Info режим
+				ModuleMode: "info",
 				X:          50, Y: 200, Width: 220, Height: 100, Opacity: 1.0,
 				ColorR: 50, ColorG: 50, ColorB: 70,
 				TextColorR: 180, TextColorG: 180, TextColorB: 255,
@@ -1230,7 +1257,7 @@ func main() {
 	currentApp = app.New()
 	currentApp.Settings().SetTheme(theme.DarkTheme())
 
-	mainWindow = currentApp.NewWindow("osu! patcher")
+	mainWindow = currentApp.NewWindow("osu! launcher") // ну будем честны, это уже нихуя не патчер :3
 	mainWindow.Resize(fyne.NewSize(1100, 650))
 	mainWindow.SetFixedSize(true)
 	mainWindow.CenterOnScreen()

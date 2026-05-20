@@ -35,19 +35,19 @@
     {
       "id": "mod_2",
       "type": "module",
-      "x": 76,
-      "y": 218,
-      "width": 220,
-      "height": 100,
+      "x": 3,
+      "y": 47,
+      "width": 400,
+      "height": 200,
       "opacity": 1,
-      "endpoint": "https://music.youtube.com",
+      "endpoint": "https://api.pawinput.xyz/v1/users/scores/best?mode=0\u0026rx=0\u0026p=1\u0026l=100\u0026id=4",
       "color_r": 50,
       "color_g": 50,
       "color_b": 70,
       "text_color_r": 180,
       "text_color_g": 180,
       "text_color_b": 255,
-      "module_mode": "url"
+      "module_mode": "info"
     }
   ]
 }
