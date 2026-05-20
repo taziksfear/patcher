@@ -1,0 +1,53 @@
+{
+  "name": "Default Theme",
+  "elements": [
+    {
+      "id": "bg_main",
+      "type": "background",
+      "x": 0,
+      "y": 0,
+      "opacity": 1,
+      "blur": 20,
+      "image": "bg.jpg",
+      "color_r": 255,
+      "color_g": 255,
+      "color_b": 255,
+      "text_color_r": 0,
+      "text_color_g": 0,
+      "text_color_b": 0
+    },
+    {
+      "id": "btn_play",
+      "type": "button",
+      "text": "PLAY",
+      "x": 25,
+      "y": 581,
+      "width": 160,
+      "height": 52,
+      "opacity": 1,
+      "color_r": 255,
+      "color_g": 255,
+      "color_b": 255,
+      "text_color_r": 0,
+      "text_color_g": 0,
+      "text_color_b": 0
+    },
+    {
+      "id": "mod_2",
+      "type": "module",
+      "x": 76,
+      "y": 218,
+      "width": 220,
+      "height": 100,
+      "opacity": 1,
+      "endpoint": "https://music.youtube.com",
+      "color_r": 50,
+      "color_g": 50,
+      "color_b": 70,
+      "text_color_r": 180,
+      "text_color_g": 180,
+      "text_color_b": 255,
+      "module_mode": "url"
+    }
+  ]
+}
