@@ -110,8 +110,9 @@ type ThemeConfig struct {
 }
 
 type AppSettings struct {
-	Language string `json:"language"`
-	GamePath string `json:"game_path"`
+	Language    string `json:"language"`
+	GamePath    string `json:"game_path"`
+	TopPlaysURL string `json:"top_plays_url"`
 }
 
 var (
@@ -384,7 +385,22 @@ func buildElementVisual(el *UIElement, isEditMode bool) fyne.CanvasObject {
 		}
 		visual = btnContainer
 
-	case "module": //TODO: webview fix. add more api patterns for diff servers than akatsuki's one. pre desing for api output
+	case "topplays":
+		w, h := el.Width, el.Height
+		if w <= 0 { w = 440 }
+		if h <= 0 { h = 400 }
+		tpObj := BuildTopPlaysWidget(el)
+		if isEditMode {
+			d := NewDraggable(tpObj, el, showPropertiesPanel)
+			d.Move(fyne.NewPos(el.X, el.Y))
+			d.Resize(fyne.NewSize(w, h))
+			return d
+		}
+		tpObj.Resize(fyne.NewSize(w, h))
+		tpObj.Move(fyne.NewPos(el.X, el.Y))
+		return tpObj
+
+	case "module": // api text / webview screenshot tile
 		bgRect := canvas.NewRectangle(color.NRGBA{
 			R: el.ColorR, G: el.ColorG, B: el.ColorB, A: alpha,
 		})
@@ -525,7 +541,11 @@ func handleButtonAction(el *UIElement) {
 		return
 	}
 	if el.Action == "internal://launch" {
-		fmt.Println("(not working rn) launching osu!.exe from:", appSettings.GamePath)
+		dialog.ShowInformation(
+			"Launch unavailable",
+			"Game launch is not available in this build.\n\nCompile the required DLLs / Wine bridge first.",
+			mainWindow,
+		)
 		return
 	}
 }
@@ -641,6 +661,8 @@ func showPropertiesPanel(el *UIElement) {
 		items = append(items, buildButtonInspector(el)...)
 	case "module":
 		items = append(items, buildModuleInspector(el)...)
+	case "topplays":
+		items = append(items, buildTopPlaysInspector(el)...)
 	}
 	if el.Type != "background" {
 		items = append(items, widget.NewSeparator())
@@ -828,6 +850,48 @@ func buildModuleInspector(el *UIElement) []fyne.CanvasObject {
 	return out
 }
 
+func buildTopPlaysInspector(el *UIElement) []fyne.CanvasObject {
+	epEntry := widget.NewEntry()
+	epEntry.SetText(el.Endpoint)
+	epEntry.SetPlaceHolder("https://.../api/v1/users/scores/best?id=…&l=5")
+	epEntry.OnChanged = func(s string) { el.Endpoint = s }
+
+	clearBtn := widget.NewButton("Disconnect", func() {
+		el.Endpoint = ""
+		epEntry.SetText("")
+		saveConfig()
+		buildCanvasObjects(isEditorMode)
+	})
+	clearBtn.Importance = widget.DangerImportance
+
+	out := []fyne.CanvasObject{
+		labeledRow("X", float32Entry(el.X, func(v float32) { el.X = v })),
+		labeledRow("Y", float32Entry(el.Y, func(v float32) { el.Y = v })),
+		labeledRow("Width", float32Entry(el.Width, func(v float32) { el.Width = v })),
+		labeledRow("Height", float32Entry(el.Height, func(v float32) { el.Height = v })),
+		labeledRow("Opacity (0-1)", floatEntry(el.Opacity, 0, 1, func(v float64) { el.Opacity = v })),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("API Endpoint", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		epEntry,
+		clearBtn,
+		widget.NewSeparator(),
+	}
+	out = append(out, colorRows("Placeholder Color",
+		el.ColorR, el.ColorG, el.ColorB,
+		func(v uint8) { el.ColorR = v },
+		func(v uint8) { el.ColorG = v },
+		func(v uint8) { el.ColorB = v },
+	)...)
+	out = append(out, widget.NewSeparator())
+	out = append(out, colorRows("Text Color",
+		el.TextColorR, el.TextColorG, el.TextColorB,
+		func(v uint8) { el.TextColorR = v },
+		func(v uint8) { el.TextColorG = v },
+		func(v uint8) { el.TextColorB = v },
+	)...)
+	return out
+}
+
 func deleteElement(el *UIElement) {
 	dialog.ShowConfirm(T("confirm_delete"), fmt.Sprintf("Удалить '%s'?", el.ID), func(ok bool) {
 		if !ok {
@@ -893,6 +957,16 @@ func showTemplatesPanel() {
 				TextColorR: 180, TextColorG: 180, TextColorB: 255,
 			}
 		}},
+		{"Top Plays", func() *UIElement {
+			return &UIElement{
+				ID:       nextID("topplays"),
+				Type:     "topplays",
+				Endpoint: "", // user fills via connect screen
+				X:        50, Y: 130, Width: 440, Height: 400, Opacity: 1.0,
+				ColorR: 25, ColorG: 20, ColorB: 40,
+				TextColorR: 255, TextColorG: 100, TextColorB: 165,
+			}
+		}},
 	}
 	var btns []fyne.CanvasObject
 	btns = append(btns,
@@ -930,6 +1004,8 @@ func buildLayersPanel() fyne.CanvasObject {
 				icon.SetResource(theme.ConfirmIcon())
 			case "module":
 				icon.SetResource(theme.ComputerIcon())
+			case "topplays":
+				icon.SetResource(theme.ListIcon())
 			default:
 				icon.SetResource(theme.DocumentIcon())
 			}
@@ -1049,7 +1125,52 @@ func buildSettingsScreen() {
 		dialog.ShowInformation("Saved", T("saved_msg"), mainWindow)
 	})
 
+	// ── Account (top plays) ───────────────────────────────────────────────
+	tpEntry := widget.NewEntry()
+	tpEntry.SetText(appSettings.TopPlaysURL)
+	tpEntry.SetPlaceHolder("https://akatsuki.gg/api/v1/users/scores/best?id=…&mode=0&rx=0&l=5")
+	tpEntry.OnChanged = func(s string) { appSettings.TopPlaysURL = s }
+
+	tpStatusLbl := widget.NewLabel("")
+
+	tpSaveBtn := widget.NewButton("Save & Test", func() {
+		url := strings.TrimSpace(tpEntry.Text)
+		tpStatusLbl.SetText("checking…")
+		go func() {
+			_, err := fetchTopPlays(url)
+			if err != nil {
+				tpStatusLbl.SetText("⚠ " + err.Error())
+				return
+			}
+			appSettings.TopPlaysURL = url
+			saveAppSettings()
+			// Propagate to any topplays elements that have no override.
+			for _, el := range activeTheme.Elements {
+				if el.Type == "topplays" && el.Endpoint == "" {
+					el.Endpoint = url
+				}
+			}
+			saveConfig()
+			tpStatusLbl.SetText("✓ connected")
+		}()
+	})
+
+	tpClearBtn := widget.NewButton("Disconnect", func() {
+		appSettings.TopPlaysURL = ""
+		tpEntry.SetText("")
+		tpStatusLbl.SetText("")
+		saveAppSettings()
+	})
+
 	configsContent := container.NewVBox(
+		sectionTitle("Account"),
+		widget.NewSeparator(),
+		widget.NewLabel("Top Plays API URL:"),
+		tpEntry,
+		widget.NewLabel("e.g. …/api/v1/users/scores/best?id=1234&mode=0&rx=0&l=5"),
+		container.NewHBox(tpSaveBtn, tpClearBtn),
+		tpStatusLbl,
+		widget.NewSeparator(),
 		sectionTitle("Game Path"),
 		widget.NewSeparator(),
 		widget.NewLabel(T("game_path_label")+":"),

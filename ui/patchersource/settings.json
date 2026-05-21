@@ -1,4 +1,5 @@
 {
-  "language": "Русский",
-  "game_path": "/home/tazik/.local/share/osu-wine/osu!/real_osu/osu!.exe"
+  "language": "English",
+  "game_path": "/home/tazik/.local/share/osu-wine/osu!/real_osu/osu!.exe",
+  "top_plays_url": "https://akatsuki.gg/api/v1/users/scores/best?mode=0\u0026p=1\u0026l=100\u0026rx=1\u0026id=117279"
 }

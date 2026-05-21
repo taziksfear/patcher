@@ -35,19 +35,35 @@
     {
       "id": "mod_2",
       "type": "module",
-      "x": 3,
-      "y": 47,
+      "x": 694,
+      "y": 51,
       "width": 400,
       "height": 200,
       "opacity": 1,
-      "endpoint": "https://api.pawinput.xyz/v1/users/scores/best?mode=0\u0026rx=0\u0026p=1\u0026l=100\u0026id=4",
+      "endpoint": "https://www.wikipedia.org",
       "color_r": 50,
       "color_g": 50,
       "color_b": 70,
       "text_color_r": 180,
       "text_color_g": 180,
       "text_color_b": 255,
-      "module_mode": "info"
+      "module_mode": "url"
+    },
+    {
+      "id": "topplays_3",
+      "type": "topplays",
+      "x": 1,
+      "y": 46,
+      "width": 440,
+      "height": 300,
+      "opacity": 1,
+      "endpoint": "https://akatsuki.gg/api/v1/users/scores/best?mode=0\u0026p=1\u0026l=100\u0026rx=1\u0026id=117279",
+      "color_r": 25,
+      "color_g": 20,
+      "color_b": 40,
+      "text_color_r": 255,
+      "text_color_g": 100,
+      "text_color_b": 165
     }
   ]
 }
