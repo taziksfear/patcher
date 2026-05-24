@@ -1,32 +1,36 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net6.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    
-    <!-- Self-contained настройки -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
-    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
-    <PublishReadyToRun>true</PublishReadyToRun>
-    
-    <!-- Оптимизации -->
-    <DebugType>embedded</DebugType>
-    <DebugSymbols>true</DebugSymbols>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    
-    <!-- Важно: osu! обычно 32-битное -->
+    <RootNamespace>osu_patcher</RootNamespace>
+    <!-- Output named "osu!.exe" so the Go launcher can drop it into the
+         osu folder as the front-line executable that osu-wine launches. -->
+    <AssemblyName>osu!</AssemblyName>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <UseWindowsForms>false</UseWindowsForms>
+
+    <!-- osu! is 32-bit, so the patcher must be 32-bit too to inject reliably. -->
     <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="0Harmony.dll" />
+    <EmbeddedResource Include="_patcher.dll" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="HoLLy.ManagedInjector" Version="1.0.0" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- DLL как встроенные ресурсы -->
-    <EmbeddedResource Include="0Harmony.dll" />
-    <EmbeddedResource Include="_patcher.dll" />
-  </ItemGroup>
 </Project>

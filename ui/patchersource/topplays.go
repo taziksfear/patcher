@@ -23,6 +23,19 @@ const (
 	maxTopPlays    = 5
 )
 
+type TopPlaysPreset struct {
+	Name        string
+	URLTemplate string // single %s for user id
+}
+
+var topPlaysPresets = []TopPlaysPreset{
+	{"Akatsuki (vanilla)", "https://akatsuki.gg/api/v1/users/scores/best?id=%s&mode=0&rx=0&l=5"},
+	{"Akatsuki (relax)", "https://akatsuki.gg/api/v1/users/scores/best?id=%s&mode=0&rx=1&l=5"},
+	{"Akatsuki (autopilot)", "https://akatsuki.gg/api/v1/users/scores/best?id=%s&mode=0&rx=2&l=5"},
+	{"Ripple", "https://ripple.moe/api/v1/users/scores/best?id=%s&mode=0&rx=0&l=5"},
+	{"Ripple (relax)", "https://ripple.moe/api/v1/users/scores/best?id=%s&mode=0&rx=1&l=5"},
+}
+
 type TopBeatmap struct {
 	BeatmapID    int     `json:"beatmap_id"`
 	BeatmapSetID int     `json:"beatmapset_id"`
@@ -177,14 +190,10 @@ func buildPlayCard(idx int, score TopScore, cardW, cardH float32) fyne.CanvasObj
 
 	coverImg := canvas.NewImageFromFile("")
 	coverImg.FillMode = canvas.ImageFillStretch
+	coverImg.SetMinSize(fyne.NewSize(cardW, cardH))
+	coverImg.Resize(fyne.NewSize(cardW, cardH))
 
-	fullDim := canvas.NewRectangle(color.NRGBA{R: 0, G: 0, B: 0, A: 145})
-
-	leftDim := canvas.NewRectangle(color.NRGBA{R: 8, G: 6, B: 18, A: 110})
-	leftDim.Resize(fyne.NewSize(cardW*(1-rightW), cardH))
-
-	rightAccent := canvas.NewRectangle(color.NRGBA{R: 255, G: 40, B: 110, A: 45})
-	rightAccent.Resize(fyne.NewSize(cardW*rightW, cardH))
+	fullDim := canvas.NewRectangle(color.NRGBA{R: 0, G: 0, B: 0, A: 120})
 
 	pink := color.NRGBA{R: 255, G: 100, B: 165, A: 210}
 
@@ -234,7 +243,7 @@ func buildPlayCard(idx int, score TopScore, cardW, cardH float32) fyne.CanvasObj
 		leftPad,
 	)
 
-	card := container.NewStack(coverImg, fullDim, leftDim, rightAccent, row)
+	card := container.NewStack(coverImg, fullDim, row)
 
 	go func(setID int) {
 		if setID <= 0 {
@@ -247,6 +256,7 @@ func buildPlayCard(idx int, score TopScore, cardW, cardH float32) fyne.CanvasObj
 		}
 		time.Sleep(15 * time.Millisecond)
 		coverImg.File = path
+		coverImg.Resize(fyne.NewSize(cardW, cardH))
 		coverImg.Refresh()
 		canvas.Refresh(coverImg)
 	}(score.Beatmap.BeatmapSetID)
@@ -368,7 +378,7 @@ func BuildTopPlaysWidget(el *UIElement) fyne.CanvasObject {
 		var cards []fyne.CanvasObject
 		for i, s := range scores {
 			if i > 0 {
-				sep := canvas.NewRectangle(color.NRGBA{R: 255, G: 50, B: 120, A: 50})
+				sep := canvas.NewRectangle(color.NRGBA{R: 255, G: 255, B: 255, A: 25})
 				sep.SetMinSize(fyne.NewSize(w, 1))
 				cards = append(cards, sep)
 			}

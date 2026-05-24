@@ -1,161 +1,200 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Threading;
 using System.Diagnostics;
 using System.Reflection;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using HoLLy.ManagedInjector;
 
 namespace osu_patcher
 {
     internal class App
     {
-        private static readonly string tmpdir = Path.Combine(Path.GetTempPath(), "osu_patcher_" + Guid.NewGuid().ToString().Substring(0, 8));
-        private static string log_path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "patcher_log.txt");
+        private static readonly string tmpdir =
+            Path.Combine(Path.GetTempPath(), "osu_patcher_" + Guid.NewGuid().ToString().Substring(0, 8));
+
+        // In single-file publish, AppDomain.BaseDirectory points at the extraction
+        // temp dir, NOT the location of the exe on disk. ProcessPath is the only
+        // reliable way to find the real folder. This was the core bug that broke
+        // the previous patcher when run as a published single-file exe.
+        private static readonly string exePath =
+            Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule!.FileName!;
+        private static readonly string baseDir = Path.GetDirectoryName(exePath)!;
+
+        private static string logPath = Path.Combine(baseDir, "patcher_log.txt");
 
         public static void Main(string[] args)
         {
-            File.WriteAllText(log_path, $"logs: {DateTime.Now}\n");
+            try { File.WriteAllText(logPath, $"logs: {DateTime.Now}\n"); } catch { }
 
             try
             {
+                // --osu-dir / --server / --client let the Go UI drive the patcher
+                // explicitly. Without them we fall back to baseDir + server.txt/client.txt
+                // so the exe still works when dropped standalone into an osu folder.
+                var (cliArgs, osuDirOverride, srvOverride, clientOverride) = ParseCliOverrides(args);
+
+                string resolvedOsuDir =
+                    !string.IsNullOrEmpty(osuDirOverride) ? osuDirOverride : baseDir;
+                logPath = Path.Combine(resolvedOsuDir, "patcher_log.txt");
+
                 Log($"[ENV] OS: {Environment.OSVersion} | runtime: {Environment.Version}");
-                
-                string curdir = AppDomain.CurrentDomain.BaseDirectory;
-                string gamedir = Path.Combine(curdir, "real_osu");
-                string game_exe = Path.Combine(gamedir, "osu!.exe");
+                Log($"[ENV] exePath: {exePath}");
+                Log($"[ENV] baseDir: {baseDir} | osuDir: {resolvedOsuDir}");
 
-                string srv_file = Path.Combine(curdir, "server.txt");
-                string srv = "bancho";
+                string srv = !string.IsNullOrEmpty(srvOverride)
+                    ? srvOverride
+                    : ReadFile(resolvedOsuDir, "server.txt", "bancho");
+                string client = !string.IsNullOrEmpty(clientOverride)
+                    ? clientOverride
+                    : ReadFile(resolvedOsuDir, "client.txt", "default");
+                srv = (srv ?? "").Trim().ToLower();
+                client = (client ?? "").Trim();
 
-                if (File.Exists(srv_file))
+                Log($"[SELECTION] server='{srv}' client='{client}'");
+
+                args = cliArgs;
+
+                // ── routing ────────────────────────────────────────────────
+                //   client = "default" → real_osu/osu!.exe   (+inject if server != bancho)
+                //   client = "<name>"  → clients/<name>/osu!.exe (no inject; we just pass -devserver)
+                //   server = "bancho"  → no -devserver, no inject
+                bool isBancho = string.IsNullOrEmpty(srv) || srv.Equals("bancho", StringComparison.OrdinalIgnoreCase);
+                bool isCustomClient = !string.IsNullOrEmpty(client) && !client.Equals("default", StringComparison.OrdinalIgnoreCase);
+
+                // Implicit custom client: clients/<srv>/osu!.exe exists. Matches the
+                // example/GO behaviour where the server name doubles as the client
+                // folder when present. Only kicks in if the UI didn't pick a client.
+                if (!isCustomClient && !isBancho)
                 {
-                    srv = File.ReadAllText(srv_file).Trim().ToLower();
-                    File.Delete(srv_file);
-                    Log($"[SERVER] Resolved server: {srv}");
+                    string implicitDir = Path.Combine(resolvedOsuDir, "clients", srv);
+                    string implicitExe = Path.Combine(implicitDir, "osu!.exe");
+                    if (Directory.Exists(implicitDir) && File.Exists(implicitExe))
+                    {
+                        client = srv;
+                        isCustomClient = true;
+                        Log($"[ROUTE] implicit custom client matched server name → {implicitExe}");
+                    }
                 }
 
-                string target_exe = game_exe;
-                string target_dir = gamedir;
-                bool needs_inject = false;
+                string targetExe;
+                string targetDir;
+                bool needsInject;
 
-                string custom_dir = Path.Combine(curdir, "clients", srv);
-                string custom_exe = Path.Combine(custom_dir, "osu!.exe");
-
-                bool is_custom_client = Directory.Exists(custom_dir) && File.Exists(custom_exe);
-                bool is_bancho = string.IsNullOrEmpty(srv) || srv == "bancho";
-
-                if (is_custom_client)
+                if (isCustomClient)
                 {
-                    Log($"[ROUTE] Found custom client for '{srv}'. Using: {custom_exe}");
-                    target_exe = custom_exe;
-                    target_dir = custom_dir;
-                    needs_inject = false; 
+                    string customDir = Path.Combine(resolvedOsuDir, "clients", client);
+                    string customExe = Path.Combine(customDir, "osu!.exe");
+                    if (!File.Exists(customExe))
+                    {
+                        FailAndExit($"custom client '{client}' has no osu!.exe at:\n{customExe}");
+                        return;
+                    }
+                    targetExe = customExe;
+                    targetDir = customDir;
+                    needsInject = false; // custom clients bake in their own networking
+                    Log($"[ROUTE] custom client '{client}' → {customExe}");
                 }
                 else
                 {
-                    Log($"[ROUTE] No custom client for '{srv}'. Using real_osu.");
-                    
-                    if (!File.Exists(game_exe))
+                    if (!TryResolveOsuExe(resolvedOsuDir, out targetExe, out targetDir))
                     {
-                        Log($"[!] Error: Cannot find {game_exe}");
-                        Console.WriteLine($"[!] Error: can't find {game_exe}");
-                        Console.ReadLine();
+                        FailAndExit($"osu!.exe not found.\nSearched: {string.Join(", ", OsuExeCandidates(resolvedOsuDir))}");
                         return;
                     }
-
-                    if (!is_bancho)
-                    {
-                        needs_inject = true;
-                        Log($"[ROUTE] Injection required for private server: {srv}");
-                    }
-                    else
-                    {
-                        Log($"[ROUTE] Bancho selected. Vanilla mode, no injection.");
-                    }
+                    needsInject = !isBancho;
+                    Log(isBancho
+                        ? $"[ROUTE] vanilla + bancho → {targetExe} (no inject)"
+                        : $"[ROUTE] vanilla + '{srv}' → {targetExe} + inject + -devserver {srv}");
                 }
 
-                var new_args = new List<string>();
-                foreach (var arg in args)
+                // ── args ───────────────────────────────────────────────────
+                var newArgs = new List<string>();
+                foreach (var a in args)
                 {
-                    if (arg.Equals("-devserver", StringComparison.OrdinalIgnoreCase)) continue;
-                    new_args.Add(arg.Contains(" ") ? $"\"{arg}\"" : arg);
+                    if (a.Equals("-devserver", StringComparison.OrdinalIgnoreCase)) continue;
+                    newArgs.Add(a.Contains(" ") ? $"\"{a}\"" : a);
                 }
-
-                string final_args = string.Join(" ", new_args);
-                
-                if (needs_inject)
+                string finalArgs = string.Join(" ", newArgs);
+                if (!isBancho)
                 {
-                    final_args += (string.IsNullOrEmpty(final_args) ? "" : " ") + $"-devserver {srv}";
-                    Log($"[ARGS] Appended devserver arg: -devserver {srv}");
+                    finalArgs += (finalArgs.Length > 0 ? " " : "") + $"-devserver {srv}";
                 }
+                Log($"[ARGS] {finalArgs}");
 
-                bool targetIs64 = IsExe64Bit(target_exe);
-                bool useShell = !needs_inject && targetIs64;
-
-                Log($"[PROC] Target architecture: {(targetIs64 ? "64-bit" : "32-bit")}");
+                // ── start ──────────────────────────────────────────────────
+                // For custom clients (often 64-bit) we use ShellExecute so the OS
+                // handles bitness mismatches. For vanilla+inject we need a real
+                // process handle, so ShellExecute must be off.
+                bool useShell = !needsInject;
+                bool targetIs64 = IsExe64Bit(targetExe);
+                Log($"[PROC] arch={(targetIs64 ? "64-bit" : "32-bit")} useShell={useShell}");
 
                 var psi = new ProcessStartInfo
                 {
-                    FileName = target_exe,
-                    Arguments = final_args,
+                    FileName = targetExe,
+                    Arguments = finalArgs,
                     UseShellExecute = useShell,
-                    WorkingDirectory = target_dir
+                    WorkingDirectory = targetDir,
                 };
 
-                Log($"[PROC] Starting {target_exe}...");
-                var osu_proc = Process.Start(psi);
-
-                if (osu_proc == null) throw new Exception("Failed to start osu!");
-
-                if (!needs_inject)
+                Process osuProc;
+                try { osuProc = Process.Start(psi); }
+                catch (Exception ex)
                 {
-                    Log("[PROC] Running in standalone client mode. Waiting for game to exit...");
-                    osu_proc.WaitForExit();
+                    FailAndExit($"Process.Start threw: {ex.Message}\nexe={targetExe}");
+                    return;
+                }
+                if (osuProc == null) { FailAndExit("Process.Start returned null"); return; }
+                Log($"[PROC] pid {osuProc.Id} started");
+
+                if (!needsInject)
+                {
+                    Log("[PROC] no injection needed");
                     return;
                 }
 
-                Log($"[INJECT] Unpacking DLLs to {tmpdir}...");
+                // ── inject ─────────────────────────────────────────────────
                 Directory.CreateDirectory(tmpdir);
-                var harm_dll = Unpack("0Harmony.dll", tmpdir);
-                var patch_dll = Unpack("_patcher.dll", tmpdir);
+                Unpack("0Harmony.dll", tmpdir); // probed for next to _patcher.dll
+                var patcherDll = Unpack("_patcher.dll", tmpdir);
 
-                Log("[INJECT] Waiting for process to initialize...");
+                // 7s of 1s waits with HasExited checks. MainWindowHandle is unreliable
+                // under wine; this matches the original osu_patcher cadence.
+                Log("[INJECT] giving osu! 7s to initialise");
                 for (int i = 0; i < 7; i++)
                 {
                     Thread.Sleep(1000);
-                    osu_proc.Refresh();
-                    if (osu_proc.HasExited)
+                    osuProc.Refresh();
+                    if (osuProc.HasExited)
                     {
-                        Log("[INJECT] Process exited before injection could occur.");
+                        Log($"[INJECT] process exited early (code {osuProc.ExitCode})");
                         return;
                     }
                 }
 
                 try
                 {
-                    Log($"[INJECT] Attempting injection into PID {osu_proc.Id}...");
-                    using (var p = new InjectableProcess((uint)osu_proc.Id))
+                    Log($"[INJECT] attempting inject into PID {osuProc.Id}");
+                    using (var p = new InjectableProcess((uint)osuProc.Id))
                     {
-                        p.Inject(patch_dll, "_patcher.Main", "Initialize");
+                        p.Inject(patcherDll, "_patcher.Main", "Initialize");
                     }
-                    Log(">>> INJECTED SUCCESSFULLY! <<<");
-                    Console.WriteLine(">>> INJECTED! <<<");
+                    Log(">>> INJECTED <<<");
+                    Console.WriteLine(">>> INJECTED <<<");
                 }
                 catch (Exception ex)
                 {
-                    Log($"[!] Inject error: {ex.Message}");
-                    Console.WriteLine($"[!] Inject error: {ex.Message}");
+                    Log($"[INJECT] error: {ex}");
+                    Console.WriteLine($"[!] inject error: {ex.Message}");
                 }
-                
-                osu_proc.WaitForExit();
+
+                Thread.Sleep(3000);
             }
             catch (Exception e)
             {
-                Log($"[FATAL] Crash: {e.Message}");
-                Console.WriteLine($"[!] Crash: {e.Message}");
-                Console.ReadLine();
+                Log($"[FATAL] {e}");
+                Console.WriteLine($"[!] crash: {e.Message}");
             }
             finally
             {
@@ -163,51 +202,87 @@ namespace osu_patcher
             }
         }
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool IsWow64Process(IntPtr hProcess, out bool wow64Process);
-
-        private static bool IsProcess64Bit(Process proc)
+        private static (string[] gameArgs, string osuDir, string server, string client) ParseCliOverrides(string[] args)
         {
-            if (!Environment.Is64BitOperatingSystem) return false;
-            try
+            var passthrough = new List<string>();
+            string osuDir = null, server = null, client = null;
+            for (int i = 0; i < args.Length; i++)
             {
-                if (!IsWow64Process(proc.Handle, out bool isWow64)) return false;
-                return !isWow64;
+                var a = args[i];
+                if (a.Equals("--osu-dir", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { osuDir = args[++i]; continue; }
+                if (a.Equals("--server",  StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { server = args[++i]; continue; }
+                if (a.Equals("--client",  StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { client = args[++i]; continue; }
+                passthrough.Add(a);
             }
-            catch (Exception)
-            {
-                return false;
-            }
+            return (passthrough.ToArray(), osuDir, server, client);
         }
 
-        private static bool IsExe64Bit(string exePath)
+        private static string ReadFile(string dir, string name, string fallback)
+        {
+            string path = Path.Combine(dir, name);
+            if (!File.Exists(path)) return fallback;
+            try
+            {
+                var v = File.ReadAllText(path).Trim();
+                return string.IsNullOrWhiteSpace(v) ? fallback : v;
+            }
+            catch { return fallback; }
+        }
+
+        private static IEnumerable<string> OsuExeCandidates(string root)
+        {
+            yield return Path.Combine(root, "real_osu", "osu!.exe");
+            yield return Path.Combine(root, "osu!.exe");
+            yield return Path.Combine(root, "..", "osu!.exe");
+        }
+
+        private static bool TryResolveOsuExe(string root, out string exe, out string dir)
+        {
+            foreach (var c in OsuExeCandidates(root))
+            {
+                var full = Path.GetFullPath(c);
+                // Avoid pointing at our own exe — happens when patcher is dropped as osu!.exe
+                // at the osu root and real_osu/ hasn't been scaffolded yet.
+                if (File.Exists(full) && !PathsEqual(full, exePath))
+                {
+                    exe = full;
+                    dir = Path.GetDirectoryName(full) ?? root;
+                    return true;
+                }
+            }
+            exe = ""; dir = "";
+            return false;
+        }
+
+        private static bool PathsEqual(string a, string b)
+        {
+            try { return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        private static void FailAndExit(string message)
+        {
+            Log($"[FATAL] {message}");
+            Console.WriteLine($"[!] {message}");
+        }
+
+        private static bool IsExe64Bit(string p)
         {
             try
             {
-                using (var fs = new FileStream(exePath, FileMode.Open, FileAccess.Read))
-                using (var br = new BinaryReader(fs))
-                {
-                    fs.Seek(0x3C, SeekOrigin.Begin);
-                    int peOffset = br.ReadInt32();
-                    fs.Seek(peOffset + 4, SeekOrigin.Begin);
-                    ushort machine = br.ReadUInt16();
-                    return machine == 0x8664;
-                }
+                using var fs = new FileStream(p, FileMode.Open, FileAccess.Read);
+                using var br = new BinaryReader(fs);
+                fs.Seek(0x3C, SeekOrigin.Begin);
+                int peOffset = br.ReadInt32();
+                fs.Seek(peOffset + 4, SeekOrigin.Begin);
+                return br.ReadUInt16() == 0x8664;
             }
-            catch (Exception ex)
-            {
-                Log($"[ROUTE] Could not read PE header of {exePath}: {ex.Message}");
-                return false;
-            }
+            catch { return false; }
         }
 
         private static void Log(string message)
         {
-            try
-            {
-                File.AppendAllText(log_path, $"[{DateTime.Now:HH:mm:ss}] {message}\n");
-            }
-            catch { }
+            try { File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss}] {message}\n"); } catch { }
         }
 
         private static string Unpack(string resName, string outDir)
@@ -215,25 +290,19 @@ namespace osu_patcher
             var outPath = Path.Combine(outDir, resName);
             var asm = Assembly.GetExecutingAssembly();
             var stream = asm.GetManifestResourceStream($"{asm.GetName().Name}.{resName}");
-            
             if (stream == null)
             {
                 foreach (var r in asm.GetManifestResourceNames())
                 {
-                    if (r.EndsWith("." + resName) || r == resName) 
-                    { 
-                        stream = asm.GetManifestResourceStream(r); 
-                        break; 
+                    if (r.EndsWith("." + resName) || r == resName)
+                    {
+                        stream = asm.GetManifestResourceStream(r);
+                        break;
                     }
                 }
             }
-            if (stream == null) throw new FileNotFoundException($"Resource {resName} missing.");
-            
-            using (stream) 
-            using (var fs = File.Create(outPath)) 
-            {
-                stream.CopyTo(fs);
-            }
+            if (stream == null) throw new FileNotFoundException($"resource {resName} missing");
+            using (stream) using (var fs = File.Create(outPath)) { stream.CopyTo(fs); }
             return outPath;
         }
 
