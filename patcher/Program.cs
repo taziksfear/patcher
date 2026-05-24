@@ -29,10 +29,11 @@ namespace osu_patcher
 
             try
             {
-                // --osu-dir / --server / --client let the Go UI drive the patcher
-                // explicitly. Without them we fall back to baseDir + server.txt/client.txt
-                // so the exe still works when dropped standalone into an osu folder.
-                var (cliArgs, osuDirOverride, srvOverride, clientOverride) = ParseCliOverrides(args);
+                // --osu-dir / --server / --client / --real-osu-dir let the Go UI
+                // drive the patcher explicitly. Without them we fall back to baseDir
+                // + server.txt/client.txt/real_osu_dir.txt so the exe still works
+                // when dropped standalone into an osu folder.
+                var (cliArgs, osuDirOverride, srvOverride, clientOverride, realOsuDirOverride) = ParseCliOverrides(args);
 
                 string resolvedOsuDir =
                     !string.IsNullOrEmpty(osuDirOverride) ? osuDirOverride : baseDir;
@@ -48,10 +49,16 @@ namespace osu_patcher
                 string client = !string.IsNullOrEmpty(clientOverride)
                     ? clientOverride
                     : ReadFile(resolvedOsuDir, "client.txt", "default");
+                // realOsuDir: full path to the user's real osu dir. We append
+                // osu!.exe to it. Empty = fall through to OsuExeCandidates lookup.
+                string realOsuDir = !string.IsNullOrEmpty(realOsuDirOverride)
+                    ? realOsuDirOverride
+                    : ReadFile(resolvedOsuDir, "real_osu_dir.txt", "");
                 srv = (srv ?? "").Trim().ToLower();
                 client = (client ?? "").Trim();
+                realOsuDir = (realOsuDir ?? "").Trim();
 
-                Log($"[SELECTION] server='{srv}' client='{client}'");
+                Log($"[SELECTION] server='{srv}' client='{client}' realOsuDir='{realOsuDir}'");
 
                 args = cliArgs;
 
@@ -97,9 +104,9 @@ namespace osu_patcher
                 }
                 else
                 {
-                    if (!TryResolveOsuExe(resolvedOsuDir, out targetExe, out targetDir))
+                    if (!TryResolveOsuExe(resolvedOsuDir, realOsuDir, out targetExe, out targetDir))
                     {
-                        FailAndExit($"osu!.exe not found.\nSearched: {string.Join(", ", OsuExeCandidates(resolvedOsuDir))}");
+                        FailAndExit($"osu!.exe not found.\nSearched: {string.Join(", ", OsuExeCandidates(resolvedOsuDir, realOsuDir))}");
                         return;
                     }
                     needsInject = !isBancho;
@@ -202,19 +209,20 @@ namespace osu_patcher
             }
         }
 
-        private static (string[] gameArgs, string osuDir, string server, string client) ParseCliOverrides(string[] args)
+        private static (string[] gameArgs, string osuDir, string server, string client, string realOsuDir) ParseCliOverrides(string[] args)
         {
             var passthrough = new List<string>();
-            string osuDir = null, server = null, client = null;
+            string osuDir = null, server = null, client = null, realOsuDir = null;
             for (int i = 0; i < args.Length; i++)
             {
                 var a = args[i];
-                if (a.Equals("--osu-dir", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { osuDir = args[++i]; continue; }
-                if (a.Equals("--server",  StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { server = args[++i]; continue; }
-                if (a.Equals("--client",  StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { client = args[++i]; continue; }
+                if (a.Equals("--osu-dir",      StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { osuDir = args[++i]; continue; }
+                if (a.Equals("--server",       StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { server = args[++i]; continue; }
+                if (a.Equals("--client",       StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { client = args[++i]; continue; }
+                if (a.Equals("--real-osu-dir", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { realOsuDir = args[++i]; continue; }
                 passthrough.Add(a);
             }
-            return (passthrough.ToArray(), osuDir, server, client);
+            return (passthrough.ToArray(), osuDir, server, client, realOsuDir);
         }
 
         private static string ReadFile(string dir, string name, string fallback)
@@ -229,16 +237,26 @@ namespace osu_patcher
             catch { return fallback; }
         }
 
-        private static IEnumerable<string> OsuExeCandidates(string root)
+        // OsuExeCandidates yields the locations we'll check for the real osu!.exe,
+        // in priority order:
+        //   1. <realOsuDir>/osu!.exe  — user-configured override (any folder, any name)
+        //   2. <root>/real_osu/osu!.exe  — legacy scaffold convention
+        //   3. <root>/osu!.exe        — patcher not deployed, real game still at root
+        //   4. <root>/../osu!.exe     — patcher one level deep
+        private static IEnumerable<string> OsuExeCandidates(string root, string realOsuDir)
         {
+            if (!string.IsNullOrEmpty(realOsuDir))
+            {
+                yield return Path.Combine(realOsuDir, "osu!.exe");
+            }
             yield return Path.Combine(root, "real_osu", "osu!.exe");
             yield return Path.Combine(root, "osu!.exe");
             yield return Path.Combine(root, "..", "osu!.exe");
         }
 
-        private static bool TryResolveOsuExe(string root, out string exe, out string dir)
+        private static bool TryResolveOsuExe(string root, string realOsuDir, out string exe, out string dir)
         {
-            foreach (var c in OsuExeCandidates(root))
+            foreach (var c in OsuExeCandidates(root, realOsuDir))
             {
                 var full = Path.GetFullPath(c);
                 // Avoid pointing at our own exe — happens when patcher is dropped as osu!.exe

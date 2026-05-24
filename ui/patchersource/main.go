@@ -116,11 +116,12 @@ type ThemeConfig struct {
 type AppSettings struct {
 	Language      string `json:"language"`
 	UserName      string `json:"user_name"` // displayed as the author on themes the user creates
-	GamePath      string `json:"game_path"`
+	GamePath      string `json:"game_path"` // legacy, kept for one cycle so old settings.json files load cleanly; auto-migrates into OsuFolder
 	PatcherPath   string `json:"patcher_path"`
-	OsuFolder     string `json:"osu_folder"`
-	Server        string `json:"server"` // -devserver value (e.g. "akatsuki.gg", "bancho")
-	Client        string `json:"client"` // clients/<name>/ folder or "default" for real_osu
+	OsuFolder     string `json:"osu_folder"`   // folder where our patcher gets dropped as osu!.exe (the wine / start-menu entrypoint)
+	RealOsuDir    string `json:"real_osu_dir"` // full path to the dir holding the user's actual osu!.exe; we append "osu!.exe" to it. Optional — when empty, the patcher falls back to OsuFolder/real_osu/ then OsuFolder/osu!.exe.
+	Server        string `json:"server"`       // -devserver value (e.g. "akatsuki.gg", "bancho")
+	Client        string `json:"client"`       // clients/<name>/ folder or "default" for real_osu
 	TopPlaysURL   string `json:"top_plays_url"`
 	LaunchCommand string `json:"launch_command"`
 }
@@ -178,6 +179,17 @@ func loadAppSettings() {
 		return
 	}
 	json.Unmarshal(data, &appSettings)
+
+	// Migration: the Game settings page used to write to GamePath (the path to
+	// osu!.exe). The launch pipeline only ever reads OsuFolder. Anyone whose
+	// last action was on the now-removed Game page would otherwise be silently
+	// unable to launch. Promote the dir part of GamePath into OsuFolder so it
+	// just works on next start, then clear the dead field.
+	if strings.TrimSpace(appSettings.OsuFolder) == "" && strings.TrimSpace(appSettings.GamePath) != "" {
+		appSettings.OsuFolder = filepath.Dir(normalizePath(appSettings.GamePath))
+		appSettings.GamePath = ""
+		saveAppSettings()
+	}
 }
 
 func saveAppSettings() {
@@ -752,10 +764,43 @@ var ownTopFiles = map[string]bool{
 	"patcher_log.txt":    true,
 }
 
+// promptOsuFolderThenLaunch pops the native folder picker, saves whatever the
+// user picks as the osu! folder, and immediately re-attempts launchOsu. Used
+// as a "set up on the fly" path so first-time users don't get blocked by an
+// error modal and never realise they need to visit Settings.
+func promptOsuFolderThenLaunch() {
+	dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
+		if err != nil || uri == nil {
+			return
+		}
+		picked := normalizePath(uri.Path())
+		if picked == "" {
+			return
+		}
+		appSettings.OsuFolder = picked
+		saveAppSettings()
+		toast(toastOpts{level: modalSuccess, message: "osu! folder set"})
+		launchOsu() // retry with the freshly-saved folder
+	}, mainWindow)
+}
+
 func launchOsu() {
-	osuDir := normalizePath(strings.TrimSpace(appSettings.OsuFolder))
+	rawSetting := strings.TrimSpace(appSettings.OsuFolder)
+	osuDir := normalizePath(rawSetting)
+
+	// First-run convenience: rather than dropping a wall-of-text error on
+	// someone hitting Launch on a clean install, open the folder picker
+	// directly. After they pick, we save it and continue the launch.
 	if osuDir == "" {
-		notifyError(fmt.Errorf("osu! folder is not set — open Settings → Server & Client and pick the folder containing osu!.exe"))
+		promptOsuFolderThenLaunch()
+		return
+	}
+	if _, err := os.Stat(osuDir); err != nil {
+		showModal(modalError, "osu! folder not found",
+			fmt.Sprintf("The saved folder doesn't exist on disk:\n  %s\n\n(raw value: %q)\n\nPick it again?", osuDir, rawSetting),
+			modalAction{Label: "Cancel"},
+			modalAction{Label: "Pick folder…", Primary: true, OnClick: promptOsuFolderThenLaunch},
+		)
 		return
 	}
 	osuDir = resolveOsuRoot(osuDir)
@@ -1043,6 +1088,11 @@ func clientHasOsuExe(root, name string) bool {
 // normalizePath strips a file:// prefix and percent-decodes the path so values
 // coming back from fyne's file dialog (which sometimes hand back URI-encoded
 // strings with %21 for !) work the same as a manually typed path.
+//
+// Windows quirk: Fyne's folder dialog returns URIs whose .Path() looks like
+// "/C:/Users/foo/osu!" — a leading slash before the drive letter. os.Stat on
+// that path fails, so the patcher thinks the folder doesn't exist. We strip
+// the leading slash whenever the second character is a drive-letter colon.
 func normalizePath(p string) string {
 	if p == "" {
 		return p
@@ -1052,6 +1102,9 @@ func normalizePath(p string) string {
 	}
 	if dec, err := url.PathUnescape(p); err == nil {
 		p = dec
+	}
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
 	}
 	return p
 }
@@ -1642,8 +1695,7 @@ func buildSettingsScreen() {
 		{"appearance", "Appearance", "Language, theme and editor access", theme.ColorPaletteIcon(), buildAppearancePage},
 		{"themes", "Themes", "Pick a preloaded look or apply your own", theme.GridIcon(), buildThemesPage},
 		{"account", "Account", "Connect your top plays via a private server API", theme.AccountIcon(), buildAccountPage},
-		{"server", "Server & Client", "Switch which osu! server / custom client the Play button uses", theme.ComputerIcon(), buildServerPage},
-		{"game", "Game", "Path to osu!.exe — used as launch fallback", theme.MediaPlayIcon(), buildGamePage},
+		{"server", "Server & Client", "osu! folder + which server / custom client gets launched", theme.ComputerIcon(), buildServerPage},
 		{"launch", "Launch Command", "Manually override how osu! is started", theme.MailForwardIcon(), buildLaunchPage},
 		{"credits", "Credits", "Who built this", theme.InfoIcon(), buildCreditsPage},
 	}
@@ -1860,14 +1912,23 @@ func buildServerPage() fyne.CanvasObject {
 	osuFolderEntry := widget.NewEntry()
 	osuFolderEntry.SetText(appSettings.OsuFolder)
 	osuFolderEntry.SetPlaceHolder("e.g. ~/.local/share/osu-wine/osu!  or  C:\\osu!")
-	osuFolderEntry.OnChanged = func(s string) { appSettings.OsuFolder = s }
+	// Auto-save on every keystroke so users can't get into the "I typed the
+	// path but forgot to hit Save" trap — Launch was failing for new users
+	// because of this. Path is normalised (file://, Windows /C:/ quirk, URI
+	// decode) on read, not on save, so we keep the raw text editable.
+	osuFolderEntry.OnChanged = func(s string) {
+		appSettings.OsuFolder = s
+		saveAppSettings()
+	}
 
 	osuFolderBrowseBtn := widget.NewButtonWithIcon(T("browse_btn"), theme.FolderOpenIcon(), func() {
 		dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
 			if err != nil || uri == nil {
 				return
 			}
-			appSettings.OsuFolder = uri.Path()
+			// Normalise immediately on Windows so the displayed value matches
+			// what we'll actually use at launch time (no rogue leading slash).
+			appSettings.OsuFolder = normalizePath(uri.Path())
 			osuFolderEntry.SetText(appSettings.OsuFolder)
 			saveAppSettings()
 		}, mainWindow)
@@ -1952,40 +2013,6 @@ func buildServerPage() fyne.CanvasObject {
 	))
 
 	return container.NewVBox(osuCard, statusCard, overrideCard)
-}
-
-func buildGamePage() fyne.CanvasObject {
-	gamePathEntry := widget.NewEntry()
-	gamePathEntry.SetText(appSettings.GamePath)
-	gamePathEntry.SetPlaceHolder("C:\\osu!\\osu!.exe   or   /path/to/osu!.exe")
-	gamePathEntry.OnChanged = func(s string) { appSettings.GamePath = s }
-
-	browseBtn := widget.NewButtonWithIcon(T("browse_btn"), theme.FolderOpenIcon(), func() {
-		fd := dialog.NewFileOpen(func(uc fyne.URIReadCloser, err error) {
-			if err != nil || uc == nil {
-				return
-			}
-			defer uc.Close()
-			appSettings.GamePath = uc.URI().Path()
-			gamePathEntry.SetText(appSettings.GamePath)
-			saveAppSettings()
-		}, mainWindow)
-		fd.SetFilter(storage.NewExtensionFileFilter([]string{".exe"}))
-		fd.Show()
-	})
-	savePathBtn := widget.NewButtonWithIcon(T("save_path_btn"), theme.DocumentSaveIcon(), func() {
-		saveAppSettings()
-		toastSaved("game path")
-	})
-
-	card := subCard(container.NewVBox(
-		fieldLabel("OSU!.EXE PATH"),
-		widget.NewLabel("Used when the Patcher exe is not set. On Linux, this gets launched via wine."),
-		gamePathEntry,
-		container.NewHBox(browseBtn, savePathBtn),
-	))
-
-	return container.NewVBox(card)
 }
 
 func buildLaunchPage() fyne.CanvasObject {
