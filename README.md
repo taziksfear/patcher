@@ -1,52 +1,39 @@
 [EN]
-well, i did ( stole tones code from re;fx ) new patcher for akatsuki for ppl from russia and countries where official akatsuki patcher stop works.
-reasons:
-1. I WANNA PLAY WITH RELAX MISSES
-2. other wants to play with relax misses
-3. 3rd party patchers dont work atleast for me
 
-hope you'll enjoy this
+fully updated ui interface with million features.
+can start:
+1. original client
+2. original client with patching (if privat server)
 
-How to start: 
-~~1. download this repository~~
-~~2. open cmd and write following commands~~
-~~3. ```cd patcher ```~~
-~~4. ```dotnet build```~~
-~~5. go to ``` C:\downoads\patcher\Patcher\bin\Release\net9.0\win-x64 ```~~
-~~6. open patcher.exe~~
-~~7. enjoy~~
+your osu! folder is never restructured — the game stays exactly where it is.
+the launcher only drops osu_patcher.exe next to your osu!.exe; on a private
+server that patcher starts the game and injects, on bancho the game is launched
+untouched.
 
-just download latest release version :fire:
+linux launches through osu-wine, windows runs the exe directly.
 
-ToDo list:
+official supported to Pawtoka ( pawinput.xyz and ez.pawinput.xyz ) server
 
-1. normal ui
-2. own icon
-3. linux support
+TODO:
+1. fix small ui errors and probably rewrite to something better than fyne
+2. test the windows build on real windows (it cross-compiles, not yet run there)
+
 
 [RU]
 
-короче, решил я написать ( украсть чужой код у re;fx (адаптироаввть)) новый патчер для акатсуки так как в россии он перестал работать да и мб в других странах.
-причины: 
-1. я хочу миссы в релаксе
-2. другие тоже хотят миссы в релаксе
-3. почему то другие патчеры не работают
+полновтью обновленный ui с множеством функций.
+может работать с:
+1. оригинальным клиентом
+2. оригинальным клиентом в режиме патчинга
 
-надеюсь тебе понравится
+папка с osu! больше не перестраивается — игра остается там, где стоит.
+лаунчер кладет osu_patcher.exe рядом с твоим osu!.exe; на приватном сервере
+патчер запускает игру и внедряется в неё, на bancho игра запускается как есть.
 
-Как запустить:
-~~1. скачай репозиторий~~
-~~2. открой консоль и пиши следующие команды~~
-~~3. ```cd patcher ```~~
-~~4. ```dotnet build```~~
-~~5. перейди в папку ``` C:\downoads\patcher\Patcher\bin\Release\net9.0\win-x64 ```~~
-~~6. открой patcher.exe~~
-~~7. наслаждайся~~
+на linux запуск идет через osu-wine, на windows — напрямую.
 
-просто скачай последнюю версию релиза :fire:
+Оффициально поддерживается сервером Pawtoka ( pawinput.xyz and ez.pawinput.xyz )
 
-ToDo list:
-
-1. нормальный интерфейс
-2. иконка приложения
-3. поддержка линукса
+TODO:
+1. пофиксить визуальные ошибки и переписать на что нибудь лучше чем fyne
+2. проверить windows-сборку на настоящей windows (собирается, но там не запускалась)

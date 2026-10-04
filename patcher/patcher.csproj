@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <RootNamespace>osu_patcher</RootNamespace>
+    <!-- Dropped next to the user's untouched osu!.exe; it launches the game and
+         injects, so it must never share the game's filename. -->
+    <AssemblyName>osu_patcher</AssemblyName>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <UseWindowsForms>false</UseWindowsForms>
+
+    <!-- osu! is 32-bit, so the patcher must be 32-bit too to inject reliably. -->
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="0Harmony.dll" />
+    <EmbeddedResource Include="_patcher.dll" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HoLLy.ManagedInjector" Version="1.0.0" />
+  </ItemGroup>
+
+</Project>
