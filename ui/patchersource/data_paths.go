@@ -11,9 +11,10 @@ import (
 )
 
 // openInFileManager opens the OS native file browser at path.
-//   Linux:   xdg-open
-//   Windows: explorer
-//   macOS:   open
+//
+//	Linux:   xdg-open
+//	Windows: explorer
+//	macOS:   open
 func openInFileManager(path string) error {
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return err
@@ -47,9 +48,10 @@ var embeddedLocalisationJSON []byte
 
 // dataRoot returns the per-user config dir for this app, falling back to
 // the working dir if the OS doesn't expose one (very unusual).
-//   Linux:   ~/.config/osu-patcher
-//   Windows: %AppData%\osu-patcher
-//   macOS:   ~/Library/Application Support/osu-patcher
+//
+//	Linux:   ~/.config/osu-patcher
+//	Windows: %AppData%\osu-patcher
+//	macOS:   ~/Library/Application Support/osu-patcher
 func dataRoot() string {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {

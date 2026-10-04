@@ -29,11 +29,10 @@ namespace osu_patcher
 
             try
             {
-                // --osu-dir / --server / --client / --real-osu-dir let the Go UI
-                // drive the patcher explicitly. Without them we fall back to baseDir
-                // + server.txt/client.txt/real_osu_dir.txt so the exe still works
-                // when dropped standalone into an osu folder.
-                var (cliArgs, osuDirOverride, srvOverride, clientOverride, realOsuDirOverride) = ParseCliOverrides(args);
+                // --osu-dir / --server let the Go UI drive the patcher explicitly.
+                // Without them we fall back to baseDir + server.txt, so the exe still
+                // works when dropped standalone into an osu folder and double-clicked.
+                var (cliArgs, osuDirOverride, srvOverride) = ParseCliOverrides(args);
 
                 string resolvedOsuDir =
                     !string.IsNullOrEmpty(osuDirOverride) ? osuDirOverride : baseDir;
@@ -46,74 +45,26 @@ namespace osu_patcher
                 string srv = !string.IsNullOrEmpty(srvOverride)
                     ? srvOverride
                     : ReadFile(resolvedOsuDir, "server.txt", "bancho");
-                string client = !string.IsNullOrEmpty(clientOverride)
-                    ? clientOverride
-                    : ReadFile(resolvedOsuDir, "client.txt", "default");
-                // realOsuDir: full path to the user's real osu dir. We append
-                // osu!.exe to it. Empty = fall through to OsuExeCandidates lookup.
-                string realOsuDir = !string.IsNullOrEmpty(realOsuDirOverride)
-                    ? realOsuDirOverride
-                    : ReadFile(resolvedOsuDir, "real_osu_dir.txt", "");
                 srv = (srv ?? "").Trim().ToLower();
-                client = (client ?? "").Trim();
-                realOsuDir = (realOsuDir ?? "").Trim();
 
-                Log($"[SELECTION] server='{srv}' client='{client}' realOsuDir='{realOsuDir}'");
+                Log($"[SELECTION] server='{srv}'");
 
                 args = cliArgs;
 
                 // ── routing ────────────────────────────────────────────────
-                //   client = "default" → real_osu/osu!.exe   (+inject if server != bancho)
-                //   client = "<name>"  → clients/<name>/osu!.exe (no inject; we just pass -devserver)
-                //   server = "bancho"  → no -devserver, no inject
+                // The game is launched wherever it already lives; we never move or
+                // rename it. bancho → plain start, private server → -devserver + inject.
                 bool isBancho = string.IsNullOrEmpty(srv) || srv.Equals("bancho", StringComparison.OrdinalIgnoreCase);
-                bool isCustomClient = !string.IsNullOrEmpty(client) && !client.Equals("default", StringComparison.OrdinalIgnoreCase);
 
-                // Implicit custom client: clients/<srv>/osu!.exe exists. Matches the
-                // example/GO behaviour where the server name doubles as the client
-                // folder when present. Only kicks in if the UI didn't pick a client.
-                if (!isCustomClient && !isBancho)
+                if (!TryResolveOsuExe(resolvedOsuDir, out string targetExe, out string targetDir))
                 {
-                    string implicitDir = Path.Combine(resolvedOsuDir, "clients", srv);
-                    string implicitExe = Path.Combine(implicitDir, "osu!.exe");
-                    if (Directory.Exists(implicitDir) && File.Exists(implicitExe))
-                    {
-                        client = srv;
-                        isCustomClient = true;
-                        Log($"[ROUTE] implicit custom client matched server name → {implicitExe}");
-                    }
+                    FailAndExit($"osu!.exe not found.\nSearched: {string.Join(", ", OsuExeCandidates(resolvedOsuDir))}");
+                    return;
                 }
-
-                string targetExe;
-                string targetDir;
-                bool needsInject;
-
-                if (isCustomClient)
-                {
-                    string customDir = Path.Combine(resolvedOsuDir, "clients", client);
-                    string customExe = Path.Combine(customDir, "osu!.exe");
-                    if (!File.Exists(customExe))
-                    {
-                        FailAndExit($"custom client '{client}' has no osu!.exe at:\n{customExe}");
-                        return;
-                    }
-                    targetExe = customExe;
-                    targetDir = customDir;
-                    needsInject = false; // custom clients bake in their own networking
-                    Log($"[ROUTE] custom client '{client}' → {customExe}");
-                }
-                else
-                {
-                    if (!TryResolveOsuExe(resolvedOsuDir, realOsuDir, out targetExe, out targetDir))
-                    {
-                        FailAndExit($"osu!.exe not found.\nSearched: {string.Join(", ", OsuExeCandidates(resolvedOsuDir, realOsuDir))}");
-                        return;
-                    }
-                    needsInject = !isBancho;
-                    Log(isBancho
-                        ? $"[ROUTE] vanilla + bancho → {targetExe} (no inject)"
-                        : $"[ROUTE] vanilla + '{srv}' → {targetExe} + inject + -devserver {srv}");
-                }
+                bool needsInject = !isBancho;
+                Log(isBancho
+                    ? $"[ROUTE] bancho → {targetExe} (no inject)"
+                    : $"[ROUTE] '{srv}' → {targetExe} + inject + -devserver {srv}");
 
                 // ── args ───────────────────────────────────────────────────
                 var newArgs = new List<string>();
@@ -130,9 +81,8 @@ namespace osu_patcher
                 Log($"[ARGS] {finalArgs}");
 
                 // ── start ──────────────────────────────────────────────────
-                // For custom clients (often 64-bit) we use ShellExecute so the OS
-                // handles bitness mismatches. For vanilla+inject we need a real
-                // process handle, so ShellExecute must be off.
+                // Injection needs a real process handle, so ShellExecute must be off
+                // there. Without injection we let the shell start it.
                 bool useShell = !needsInject;
                 bool targetIs64 = IsExe64Bit(targetExe);
                 Log($"[PROC] arch={(targetIs64 ? "64-bit" : "32-bit")} useShell={useShell}");
@@ -209,20 +159,18 @@ namespace osu_patcher
             }
         }
 
-        private static (string[] gameArgs, string osuDir, string server, string client, string realOsuDir) ParseCliOverrides(string[] args)
+        private static (string[] gameArgs, string osuDir, string server) ParseCliOverrides(string[] args)
         {
             var passthrough = new List<string>();
-            string osuDir = null, server = null, client = null, realOsuDir = null;
+            string osuDir = null, server = null;
             for (int i = 0; i < args.Length; i++)
             {
                 var a = args[i];
-                if (a.Equals("--osu-dir",      StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { osuDir = args[++i]; continue; }
-                if (a.Equals("--server",       StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { server = args[++i]; continue; }
-                if (a.Equals("--client",       StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { client = args[++i]; continue; }
-                if (a.Equals("--real-osu-dir", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { realOsuDir = args[++i]; continue; }
+                if (a.Equals("--osu-dir", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { osuDir = args[++i]; continue; }
+                if (a.Equals("--server",  StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) { server = args[++i]; continue; }
                 passthrough.Add(a);
             }
-            return (passthrough.ToArray(), osuDir, server, client, realOsuDir);
+            return (passthrough.ToArray(), osuDir, server);
         }
 
         private static string ReadFile(string dir, string name, string fallback)
@@ -237,30 +185,21 @@ namespace osu_patcher
             catch { return fallback; }
         }
 
-        // OsuExeCandidates yields the locations we'll check for the real osu!.exe,
-        // in priority order:
-        //   1. <realOsuDir>/osu!.exe  — user-configured override (any folder, any name)
-        //   2. <root>/real_osu/osu!.exe  — legacy scaffold convention
-        //   3. <root>/osu!.exe        — patcher not deployed, real game still at root
-        //   4. <root>/../osu!.exe     — patcher one level deep
-        private static IEnumerable<string> OsuExeCandidates(string root, string realOsuDir)
+        // OsuExeCandidates yields the locations we'll check for the real osu!.exe.
+        // real_osu/ comes first only because installs made by older versions of this
+        // patcher still have the real game in there, with an impostor osu!.exe (an old
+        // copy of this patcher) left at the root. Fresh installs have neither.
+        private static IEnumerable<string> OsuExeCandidates(string root)
         {
-            if (!string.IsNullOrEmpty(realOsuDir))
-            {
-                yield return Path.Combine(realOsuDir, "osu!.exe");
-            }
             yield return Path.Combine(root, "real_osu", "osu!.exe");
             yield return Path.Combine(root, "osu!.exe");
-            yield return Path.Combine(root, "..", "osu!.exe");
         }
 
-        private static bool TryResolveOsuExe(string root, string realOsuDir, out string exe, out string dir)
+        private static bool TryResolveOsuExe(string root, out string exe, out string dir)
         {
-            foreach (var c in OsuExeCandidates(root, realOsuDir))
+            foreach (var c in OsuExeCandidates(root))
             {
                 var full = Path.GetFullPath(c);
-                // Avoid pointing at our own exe — happens when patcher is dropped as osu!.exe
-                // at the osu root and real_osu/ hasn't been scaffolded yet.
                 if (File.Exists(full) && !PathsEqual(full, exePath))
                 {
                     exe = full;

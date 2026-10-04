@@ -105,7 +105,6 @@ func downloadCover(beatmapSetID int) (string, error) {
 	return dest, nil
 }
 
-
 func fetchTopPlays(endpoint string) ([]TopScore, error) {
 	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
 		endpoint = "https://" + endpoint
@@ -254,8 +253,14 @@ func buildPlayCard(idx int, score TopScore, cardW, cardH float32) fyne.CanvasObj
 			fmt.Printf("[TopPlays] cover %d: %v\n", setID, err)
 			return
 		}
+		// Covers ship at ~900x250 but are drawn card-sized; scaling on decode
+		// keeps five of them from costing several MB each time a card is built.
+		decoded := stretched(path, int(cardW), int(cardH))
+		if decoded == nil {
+			return
+		}
 		time.Sleep(15 * time.Millisecond)
-		coverImg.File = path
+		coverImg.Image = decoded
 		coverImg.Resize(fyne.NewSize(cardW, cardH))
 		coverImg.Refresh()
 		canvas.Refresh(coverImg)

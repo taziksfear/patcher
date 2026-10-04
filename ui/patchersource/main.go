@@ -2,16 +2,18 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image/color"
 	"io"
-	"net/url"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -118,17 +120,15 @@ type AppSettings struct {
 	UserName      string `json:"user_name"` // displayed as the author on themes the user creates
 	GamePath      string `json:"game_path"` // legacy, kept for one cycle so old settings.json files load cleanly; auto-migrates into OsuFolder
 	PatcherPath   string `json:"patcher_path"`
-	OsuFolder     string `json:"osu_folder"`   // folder where our patcher gets dropped as osu!.exe (the wine / start-menu entrypoint)
-	RealOsuDir    string `json:"real_osu_dir"` // full path to the dir holding the user's actual osu!.exe; we append "osu!.exe" to it. Optional — when empty, the patcher falls back to OsuFolder/real_osu/ then OsuFolder/osu!.exe.
-	Server        string `json:"server"`       // -devserver value (e.g. "akatsuki.gg", "bancho")
-	Client        string `json:"client"`       // clients/<name>/ folder or "default" for real_osu
+	OsuFolder     string `json:"osu_folder"` // the user's osu! install — the folder that holds their osu!.exe
+	Server        string `json:"server"`     // -devserver value (e.g. "akatsuki.gg", "bancho")
 	TopPlaysURL   string `json:"top_plays_url"`
 	LaunchCommand string `json:"launch_command"`
 }
 
 type ServerPreset struct {
 	Name        string // human label
-	DevServer   string // -devserver value / server.txt content / clients/<name> folder
+	DevServer   string // -devserver value / server.txt content
 	Description string
 }
 
@@ -170,15 +170,20 @@ var (
 	colorAccent    = color.NRGBA{R: 255, G: 102, B: 153, A: 255}
 	colorTextMute  = color.NRGBA{R: 175, G: 170, B: 200, A: 220}
 	colorTextStrng = color.NRGBA{R: 250, G: 248, B: 255, A: 255}
+	colorOk        = color.NRGBA{R: 80, G: 215, B: 130, A: 255}
+	colorDanger    = color.NRGBA{R: 255, G: 80, B: 100, A: 255}
+	colorWarn      = color.NRGBA{R: 245, G: 190, B: 70, A: 255}
 )
 
 func loadAppSettings() {
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
-		appSettings = AppSettings{Language: "English"}
+		appSettings = AppSettings{Language: "English", OsuFolder: detectOsuFolder()}
 		return
 	}
 	json.Unmarshal(data, &appSettings)
+
+	before := appSettings
 
 	// Migration: the Game settings page used to write to GamePath (the path to
 	// osu!.exe). The launch pipeline only ever reads OsuFolder. Anyone whose
@@ -188,8 +193,78 @@ func loadAppSettings() {
 	if strings.TrimSpace(appSettings.OsuFolder) == "" && strings.TrimSpace(appSettings.GamePath) != "" {
 		appSettings.OsuFolder = filepath.Dir(normalizePath(appSettings.GamePath))
 		appSettings.GamePath = ""
+	}
+
+	// Migration: earlier builds moved the game into <install>/real_osu and
+	// pointed OsuFolder there. The game is left in place now, so walk that back
+	// up to the install root — otherwise the saved path points at a folder that
+	// no longer exists and Launch dead-ends on "folder not found".
+	if folder := normalizePath(strings.TrimSpace(appSettings.OsuFolder)); filepath.Base(folder) == "real_osu" {
+		appSettings.OsuFolder = filepath.Dir(folder)
+	}
+
+	if !osuFolderValid(appSettings.OsuFolder) {
+		if detected := detectOsuFolder(); detected != "" {
+			appSettings.OsuFolder = detected
+		}
+	}
+
+	if appSettings != before {
 		saveAppSettings()
 	}
+}
+
+// osuFolderValid reports whether the configured folder actually holds a game we
+// can launch. Used to decide whether auto-detection should step in, and to show
+// a live status in Settings.
+func osuFolderValid(folder string) bool {
+	folder = normalizePath(strings.TrimSpace(folder))
+	return folder != "" && fileExists(filepath.Join(folder, osuExeName))
+}
+
+// detectOsuFolder finds an existing osu! install so first-run users don't have
+// to go hunting: osu-winello records the folder it manages on Linux, and the
+// Windows installer defaults to %LOCALAPPDATA%\osu!.
+func detectOsuFolder() string {
+	var candidates []string
+	if runtime.GOOS == "windows" {
+		for _, env := range []string{"LOCALAPPDATA", "ProgramFiles(x86)", "ProgramFiles"} {
+			if base := os.Getenv(env); base != "" {
+				candidates = append(candidates, filepath.Join(base, "osu!"))
+			}
+		}
+	} else {
+		if p := osuWineManagedPath(); p != "" {
+			candidates = append(candidates, p)
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates, filepath.Join(home, ".local", "share", "osu-wine", "osu!"))
+		}
+	}
+	for _, c := range candidates {
+		if fileExists(filepath.Join(c, osuExeName)) {
+			return c
+		}
+	}
+	return ""
+}
+
+// osuWineManagedPath returns the osu! folder osu-winello is configured to
+// launch, or "" when osu-winello isn't installed.
+func osuWineManagedPath() string {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	data, err := os.ReadFile(filepath.Join(dataHome, "osuconfig", "osupath"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func saveAppSettings() {
@@ -202,6 +277,14 @@ func ensureThemeDir() { os.MkdirAll(themeDir, 0755) }
 func configPath() string { return filepath.Join(themeDir, "config.json") }
 
 func saveConfig() {
+	if err := writeConfig(); err != nil {
+		notifyError(err)
+		return
+	}
+	toastSaved("theme")
+}
+
+func writeConfig() error {
 	ensureThemeDir()
 	// Stamp the user's display name as author on first save when the slot is
 	// empty. This way themes the user customizes get attributed to them
@@ -213,14 +296,9 @@ func saveConfig() {
 	}
 	data, err := json.MarshalIndent(activeTheme, "", "  ")
 	if err != nil {
-		notifyError(err)
-		return
+		return err
 	}
-	if err := os.WriteFile(configPath(), data, 0644); err != nil {
-		notifyError(err)
-		return
-	}
-	toastSaved("theme")
+	return os.WriteFile(configPath(), data, 0644)
 }
 
 func loadConfig() error {
@@ -228,7 +306,31 @@ func loadConfig() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &activeTheme)
+	if err := json.Unmarshal(data, &activeTheme); err != nil {
+		return err
+	}
+	if dropRemovedActions() {
+		return writeConfig()
+	}
+	return nil
+}
+
+// dropRemovedActions strips elements bound to actions that no longer exist.
+// Themes authored while custom clients were still a feature carry a "switch
+// client" button, which would otherwise sit there doing nothing when clicked.
+func dropRemovedActions() bool {
+	kept := make([]*UIElement, 0, len(activeTheme.Elements))
+	for _, e := range activeTheme.Elements {
+		if e.Action == "internal://switch_client" {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(kept) == len(activeTheme.Elements) {
+		return false
+	}
+	activeTheme.Elements = kept
+	return true
 }
 
 func copyImageToTheme(srcPath string) (string, error) {
@@ -375,17 +477,13 @@ func buildElementVisual(el *UIElement, isEditMode bool) fyne.CanvasObject {
 		var bg fyne.CanvasObject
 		if el.Image != "" {
 			imgPath := filepath.Join(themeDir, el.Image)
-			if _, err := os.Stat(imgPath); err == nil {
-				img := canvas.NewImageFromFile(imgPath)
+			if decoded := stretched(imgPath, int(winSize.Width), int(winSize.Height)); decoded != nil {
+				img := canvas.NewImageFromImage(decoded)
 				img.FillMode = canvas.ImageFillStretch
 				img.Translucency = 1.0 - el.Opacity
 				img.Resize(winSize)
 				img.Move(fyne.NewPos(0, 0))
 				bg = img
-				go func() {
-					time.Sleep(50 * time.Millisecond)
-					canvas.Refresh(img)
-				}()
 			}
 		}
 		if bg == nil {
@@ -440,8 +538,12 @@ func buildElementVisual(el *UIElement, isEditMode bool) fyne.CanvasObject {
 
 	case "topplays":
 		w, h := el.Width, el.Height
-		if w <= 0 { w = 440 }
-		if h <= 0 { h = 400 }
+		if w <= 0 {
+			w = 440
+		}
+		if h <= 0 {
+			h = 400
+		}
 		tpObj := BuildTopPlaysWidget(el)
 		if isEditMode {
 			d := NewDraggable(tpObj, el, showPropertiesPanel)
@@ -460,8 +562,12 @@ func buildElementVisual(el *UIElement, isEditMode bool) fyne.CanvasObject {
 		bgRect.CornerRadius = el.Radius(8)
 
 		w, h := el.Width, el.Height
-		if w <= 0 { w = 200 }
-		if h <= 0 { h = 80 }
+		if w <= 0 {
+			w = 200
+		}
+		if h <= 0 {
+			h = 80
+		}
 
 		var modContainer *fyne.Container
 
@@ -535,13 +641,15 @@ func buildElementVisual(el *UIElement, isEditMode bool) fyne.CanvasObject {
 				return tap
 			} else {
 				txt := "{ API: " + el.Endpoint + " }"
-				if el.Endpoint == "" { txt = "{ API: empty}" }
+				if el.Endpoint == "" {
+					txt = "{ API: empty}"
+				}
 				label := canvas.NewText(txt, textColor)
 				label.TextSize = 12
 				modContainer = container.NewStack(bgRect, container.NewCenter(label))
 			}
 		}
-	
+
 		visual = modContainer
 	}
 	if visual == nil {
@@ -601,10 +709,6 @@ func handleButtonAction(el *UIElement) {
 		showServerPicker()
 		return
 	}
-	if el.Action == "internal://switch_client" {
-		showClientPicker()
-		return
-	}
 }
 
 func showServerPicker() {
@@ -651,117 +755,46 @@ func showServerPicker() {
 	dlg.Show()
 }
 
-func showClientPicker() {
-	if strings.TrimSpace(appSettings.OsuFolder) == "" && strings.TrimSpace(appSettings.PatcherPath) == "" {
-		showModal(modalWarn, "No osu! folder set",
-			"Set the osu! folder in Settings → Server first.\nClients are looked up under <osu_folder>/clients/.")
-		return
-	}
-
-	clients, root := scanClients()
-
-	currentLbl := widget.NewLabel("current: " + currentServerLabel())
-	rootLbl := widget.NewLabel("scanning: " + root)
-	rootLbl.Wrapping = fyne.TextWrapWord
-
-	var items []fyne.CanvasObject
-	items = append(items, currentLbl, rootLbl, widget.NewSeparator())
-
-	var dlg dialog.Dialog
-
-	defaultBtn := widget.NewButton("Default (real_osu)  —  vanilla, injected on private server", func() {
-		appSettings.Client = "default"
-		saveAppSettings()
-		if dlg != nil {
-			dlg.Hide()
-		}
-		toast(toastOpts{level: modalSuccess, message: "Client: vanilla (real_osu)"})
-	})
-	defaultBtn.Alignment = widget.ButtonAlignLeading
-	items = append(items, defaultBtn)
-
-	if len(clients) == 0 {
-		items = append(items, widget.NewSeparator(),
-			widget.NewLabel("No subfolders found.\nDrop a folder under the path above, with osu!.exe inside."))
-	} else {
-		items = append(items, widget.NewSeparator(), widget.NewLabelWithStyle("Available clients", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
-		for _, name := range clients {
-			name := name
-			hasExe := clientHasOsuExe(root, name)
-			label := name
-			if !hasExe {
-				label = name + "   ⚠ no osu!.exe"
-			}
-			btn := widget.NewButton(label, func() {
-				appSettings.Client = name
-				saveAppSettings()
-				if dlg != nil {
-					dlg.Hide()
-				}
-				if hasExe {
-					toast(toastOpts{level: modalSuccess, message: "Client: " + name})
-				} else {
-					showModal(modalWarn, "Selected '"+name+"'",
-						"No osu!.exe in that folder — launch will fail. Pick a different client or drop osu!.exe in.")
-				}
-			})
-			btn.Alignment = widget.ButtonAlignLeading
-			items = append(items, btn)
-		}
-	}
-
-	content := container.NewVScroll(container.NewVBox(items...))
-	content.SetMinSize(fyne.NewSize(420, 360))
-	dlg = dialog.NewCustom("Switch Client", "Cancel", content, mainWindow)
-	dlg.Show()
-}
-
 func currentServerLabel() string {
-	srv := strings.TrimSpace(appSettings.Server)
-	if srv == "" {
-		srv = "bancho"
-	}
+	srv := currentServer()
 	for _, p := range serverPresets {
 		if p.DevServer == srv {
-			srv = p.Name
-			break
+			return p.Name
 		}
 	}
-	client := strings.TrimSpace(appSettings.Client)
-	if client == "" || client == "default" {
-		client = "vanilla"
-	}
-	return srv + "  ·  client: " + client
+	return srv
 }
 
 // ── launch / inject pipeline ────────────────────────────────────────────────
 //
-// This is the proven flow from example/GO:
+// The user's osu! install is never restructured: the game keeps its own folder
+// and its own osu!.exe. All we ever add is osu_patcher.exe beside it.
 //
-//   1. Resolve the osu! folder root (the dir that holds real_osu/, clients/,
-//      and server.txt — NOT real_osu/ itself).
-//   2. If the user hasn't scaffolded yet (no real_osu/ but loose game files at
-//      the top), prompt to move them in.
-//   3. Drop the bundled patcher exe AS "osu!.exe" at the osu root. osu-wine
-//      will launch that file, so the patcher gets control before the real
-//      game starts.
-//   4. Write server.txt + client.txt next to it so the patcher knows where to
-//      route. (The patcher also accepts --osu-dir/--server/--client CLI args
-//      for standalone use.)
-//   5. Launch via osu-wine (Linux) or via the patcher exe directly (Windows).
-//      A user-supplied LaunchCommand overrides everything.
+//   bancho         → start the game directly, the patcher stays out of the way
+//   private server → start osu_patcher.exe, which launches osu! and injects
+//
+// On Linux everything goes through osu-wine so its wineprefix, tablet hack and
+// runtime tweaks apply either way. A user-supplied LaunchCommand overrides the
+// whole pipeline.
 
-const patcherFilename = "osu!.exe"
+const (
+	patcherFilename = "osu_patcher.exe"
+	osuExeName      = "osu!.exe"
+)
 
-// Files we own at the top of the osu folder; never move these into real_osu/.
-var ownTopFiles = map[string]bool{
-	patcherFilename:      true,
-	"real_osu":           true,
-	"clients":            true,
-	"server.txt":         true,
-	"client.txt":         true,
-	"custom_servers.txt": true,
-	"patcher_log.txt":    true,
+// needsPatcher reports whether a server selection requires the injected runtime.
+// Only private servers do; on bancho we never touch the game.
+func needsPatcher(server string) bool {
+	s := strings.ToLower(strings.TrimSpace(server))
+	return s != "" && s != "bancho"
+}
+
+func currentServer() string {
+	srv := strings.TrimSpace(appSettings.Server)
+	if srv == "" {
+		return "bancho"
+	}
+	return srv
 }
 
 // promptOsuFolderThenLaunch pops the native folder picker, saves whatever the
@@ -785,27 +818,8 @@ func promptOsuFolderThenLaunch() {
 }
 
 func launchOsu() {
-	rawSetting := strings.TrimSpace(appSettings.OsuFolder)
-	osuDir := normalizePath(rawSetting)
-
-	// First-run convenience: rather than dropping a wall-of-text error on
-	// someone hitting Launch on a clean install, open the folder picker
-	// directly. After they pick, we save it and continue the launch.
-	if osuDir == "" {
-		promptOsuFolderThenLaunch()
-		return
-	}
-	if _, err := os.Stat(osuDir); err != nil {
-		showModal(modalError, "osu! folder not found",
-			fmt.Sprintf("The saved folder doesn't exist on disk:\n  %s\n\n(raw value: %q)\n\nPick it again?", osuDir, rawSetting),
-			modalAction{Label: "Cancel"},
-			modalAction{Label: "Pick folder…", Primary: true, OnClick: promptOsuFolderThenLaunch},
-		)
-		return
-	}
-	osuDir = resolveOsuRoot(osuDir)
-
-	// custom launch command short-circuits the whole pipeline
+	// A custom launch command replaces the pipeline outright, so it runs before
+	// any of our folder checks — it may not involve our osu! folder at all.
 	if raw := strings.TrimSpace(appSettings.LaunchCommand); raw != "" {
 		parts := strings.Fields(raw)
 		bin, err := resolveBinary(parts[0])
@@ -825,51 +839,47 @@ func launchOsu() {
 		return
 	}
 
-	if scaffNeeded, movable := needsScaffold(osuDir); scaffNeeded {
-		msg := fmt.Sprintf(
-			"First-time setup at:\n%s\n\nMove %d existing items into real_osu/ so the patcher can take over osu!.exe?\n\nItems: %s",
-			osuDir, len(movable), strings.Join(movable, ", "),
-		)
-		confirmModal("Scaffold osu folder", msg, "Move & Launch", func() {
-			if err := scaffold(osuDir, movable); err != nil {
-				notifyError(err)
-				return
-			}
-			finishLaunch(osuDir)
-		})
+	rawSetting := strings.TrimSpace(appSettings.OsuFolder)
+	osuDir := normalizePath(rawSetting)
+
+	// First-run convenience: rather than dropping a wall-of-text error on
+	// someone hitting Launch on a clean install, open the folder picker
+	// directly. After they pick, we save it and continue the launch.
+	if osuDir == "" {
+		promptOsuFolderThenLaunch()
 		return
 	}
-	_ = os.MkdirAll(filepath.Join(osuDir, "clients"), 0755)
+	if !dirExists(osuDir) {
+		showModal(modalError, "osu! folder not found",
+			fmt.Sprintf("The saved folder doesn't exist on disk:\n  %s\n\n(raw value: %q)\n\nPick it again?", osuDir, rawSetting),
+			modalAction{Label: "Cancel"},
+			modalAction{Label: "Pick folder…", Primary: true, OnClick: promptOsuFolderThenLaunch},
+		)
+		return
+	}
+
+	if !fileExists(filepath.Join(osuDir, osuExeName)) {
+		showModal(modalError, "osu!.exe not found",
+			fmt.Sprintf("No %s in:\n  %s\n\nPick the folder your osu! is installed in — the one holding osu!.exe.", osuExeName, osuDir),
+			modalAction{Label: "Cancel"},
+			modalAction{Label: "Pick folder…", Primary: true, OnClick: promptOsuFolderThenLaunch},
+		)
+		return
+	}
 	finishLaunch(osuDir)
 }
 
 func finishLaunch(osuDir string) {
-	srv := strings.TrimSpace(appSettings.Server)
-	if srv == "" {
-		srv = "bancho"
-	}
-	client := strings.TrimSpace(appSettings.Client)
-	if client == "" {
-		client = "default"
+	srv := currentServer()
+
+	if needsPatcher(srv) {
+		if err := installPatcherExe(osuDir); err != nil {
+			notifyError(fmt.Errorf("install patcher: %v", err))
+			return
+		}
 	}
 
-	// 1. drop the patcher exe AS osu!.exe so osu-wine picks it up
-	if err := installPatcherExe(osuDir); err != nil {
-		notifyError(fmt.Errorf("install patcher: %v", err))
-		return
-	}
-	// 2. selection files (also let the patcher run standalone)
-	if err := os.WriteFile(filepath.Join(osuDir, "server.txt"), []byte(srv), 0644); err != nil {
-		notifyError(err)
-		return
-	}
-	if err := os.WriteFile(filepath.Join(osuDir, "client.txt"), []byte(client), 0644); err != nil {
-		notifyError(err)
-		return
-	}
-
-	// 3. launch via osu-wine (best wine prefix handling), windows native, or wine fallback
-	cmd, source, err := launchCommand(osuDir)
+	cmd, source, err := launchCommand(osuDir, srv)
 	if err != nil {
 		notifyError(fmt.Errorf("cannot launch: %v", err))
 		return
@@ -880,18 +890,18 @@ func finishLaunch(osuDir string) {
 		return
 	}
 	go cmd.Wait()
-	fmt.Printf("[Launch] %s (pid %d) | server=%s client=%s osuDir=%s\n",
-		source, cmd.Process.Pid, srv, client, osuDir)
+	fmt.Printf("[Launch] %s (pid %d) | server=%s osuDir=%s\n", source, cmd.Process.Pid, srv, osuDir)
 }
 
-// installPatcherExe writes the embedded patcher into osuDir/osu!.exe.
-// Falls back to the user-configured PatcherPath if no bundled exe is present.
-// If the existing osu!.exe at that location is byte-identical we skip the write.
+// installPatcherExe drops the injector next to the game as osu_patcher.exe.
+// Falls back to the user-configured PatcherPath if this build has no bundled
+// exe. An already-identical file is left alone so we don't rewrite ~32MB on
+// every launch.
 func installPatcherExe(osuDir string) error {
 	dst := filepath.Join(osuDir, patcherFilename)
 
 	if hasEmbeddedPatcher() {
-		if existing, err := os.ReadFile(dst); err == nil && bytesEqual(existing, embeddedPatcherExe) {
+		if fileHasContent(dst, embeddedPatcherExe) {
 			return nil
 		}
 		return os.WriteFile(dst, embeddedPatcherExe, 0755)
@@ -899,124 +909,119 @@ func installPatcherExe(osuDir string) error {
 
 	src := normalizePath(strings.TrimSpace(appSettings.PatcherPath))
 	if src == "" {
-		return fmt.Errorf("no bundled patcher in this build and no PatcherPath set — rebuild via build.sh or set Settings → Server & Client → Advanced")
+		return fmt.Errorf("no bundled patcher in this build and no PatcherPath set — rebuild via build.sh or set Settings → Game → Advanced")
 	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return fmt.Errorf("read %s: %v", src, err)
+	if err := copyFile(src, dst); err != nil {
+		return fmt.Errorf("copy %s: %v", src, err)
 	}
-	if existing, err := os.ReadFile(dst); err == nil && bytesEqual(existing, data) {
-		return nil
-	}
-	return os.WriteFile(dst, data, 0755)
+	return os.Chmod(dst, 0755)
 }
 
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
+// fileHasContent reports whether path already holds exactly want. It streams
+// rather than reading the file in, because want is the ~32MB embedded patcher
+// and this runs on every launch.
+func fileHasContent(path string, want []byte) bool {
+	f, err := os.Open(path)
+	if err != nil {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
+	defer f.Close()
+	if info, err := f.Stat(); err != nil || info.Size() != int64(len(want)) {
+		return false
+	}
+	buf := make([]byte, 64*1024)
+	for off := 0; off < len(want); {
+		n, err := io.ReadFull(f, buf[:min(len(buf), len(want)-off)])
+		if err != nil || !bytes.Equal(buf[:n], want[off:off+n]) {
 			return false
 		}
+		off += n
 	}
 	return true
 }
 
-// launchCommand returns the exec.Cmd that actually fires up the patcher.
-//   Linux: prefer osu-wine (handles WINEPREFIX/WINEARCH/dxvk); fall back to
-//          plain wine. Either way we point it at the patcher exe in osuDir.
-//   Windows: just run the exe.
-func launchCommand(osuDir string) (*exec.Cmd, string, error) {
+// launchCommand builds the command that starts the game.
+//
+//	Windows: run the patcher (private server) or osu!.exe itself (bancho).
+//	Linux:   go through osu-wine so the wineprefix and its runtime tweaks apply.
+//	         Plain `osu-wine` is preferred when it already manages this folder,
+//	         since that path also applies the user's pre/post launch args.
+func launchCommand(osuDir, srv string) (*exec.Cmd, string, error) {
 	patcher := filepath.Join(osuDir, patcherFilename)
+	osuExe := filepath.Join(osuDir, osuExeName)
+	inject := needsPatcher(srv)
 
 	if runtime.GOOS == "windows" {
-		c := exec.Command(patcher)
+		var c *exec.Cmd
+		source := osuExe
+		if inject {
+			c = exec.Command(patcher, "--server", srv)
+			source = patcher
+		} else {
+			c = exec.Command(osuExe)
+		}
 		c.Dir = osuDir
 		c.Env = os.Environ()
-		return c, patcher, nil
+		return c, source, nil
 	}
 
-	for _, cand := range []string{"osu-wine", filepath.Join(os.Getenv("HOME"), ".local/bin/osu-wine")} {
-		if bin, err := resolveBinary(cand); err == nil {
-			c := exec.Command(bin)
-			c.Dir = osuDir
-			c.Env = os.Environ()
-			return c, bin, nil
+	if osuWine, err := findOsuWine(); err == nil {
+		var args []string
+		switch {
+		case inject:
+			args = []string{"--wine", patcher, "--server", srv}
+		case sameFolder(osuDir, osuWineManagedPath()):
+			args = nil // osu-wine already points at this install; let it do the full launch
+		default:
+			args = []string{"--wine", osuExe}
 		}
+		c := exec.Command(osuWine, args...)
+		c.Dir = osuDir
+		c.Env = os.Environ()
+		return c, strings.TrimSpace(osuWine + " " + strings.Join(args, " ")), nil
 	}
+
 	wine, err := resolveBinary("wine")
 	if err != nil {
 		return nil, "", fmt.Errorf("neither osu-wine nor wine found in PATH")
 	}
-	c := exec.Command(wine, patcher)
+	target := osuExe
+	var extra []string
+	if inject {
+		target, extra = patcher, []string{"--server", srv}
+	}
+	c := exec.Command(wine, append([]string{target}, extra...)...)
 	c.Dir = osuDir
 	c.Env = os.Environ()
-	return c, "wine " + patcher, nil
+	return c, "wine " + target, nil
 }
 
-// needsScaffold returns true when osu dir has game files at the top level but
-// no real_osu/ subdir — meaning we should offer to move them in so the patcher
-// can take over osu!.exe at the root without colliding with the real game.
-func needsScaffold(osuDir string) (bool, []string) {
-	if dirExists(filepath.Join(osuDir, "real_osu")) {
-		return false, nil
+func findOsuWine() (string, error) {
+	candidates := []string{"osu-wine"}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".local", "bin", "osu-wine"))
 	}
-	entries, err := os.ReadDir(osuDir)
+	for _, cand := range candidates {
+		if bin, err := resolveBinary(cand); err == nil {
+			return bin, nil
+		}
+	}
+	return "", fmt.Errorf("osu-wine not found")
+}
+
+func sameFolder(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ra, err := filepath.Abs(normalizePath(a))
 	if err != nil {
-		return false, nil
+		return false
 	}
-	var movable []string
-	for _, e := range entries {
-		if ownTopFiles[e.Name()] {
-			continue
-		}
-		movable = append(movable, e.Name())
+	rb, err := filepath.Abs(normalizePath(b))
+	if err != nil {
+		return false
 	}
-	return len(movable) > 0, movable
-}
-
-func scaffold(osuDir string, movable []string) error {
-	realOsu := filepath.Join(osuDir, "real_osu")
-	if err := os.MkdirAll(realOsu, 0755); err != nil {
-		return err
-	}
-	for _, name := range movable {
-		src := filepath.Join(osuDir, name)
-		dst := filepath.Join(realOsu, name)
-		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("move %s: %w", name, err)
-		}
-	}
-	return os.MkdirAll(filepath.Join(osuDir, "clients"), 0755)
-}
-
-// resolveClientsRoot finds the clients/ directory regardless of whether the
-// patcher exe is placed next to it OR inside one of its subfolders.
-// Search order: <dir>/clients → walk up; if a parent is itself named "clients",
-// use that one. Falls back to <patcherDir>/clients even if it doesn't exist.
-func resolveClientsRoot(patcher string) string {
-	return resolveClientsRootFromDir(filepath.Dir(patcher))
-}
-
-// resolveOsuRoot finds the osu! root that holds clients/ (and usually real_osu/).
-// Walks up from whatever the user picked, looking specifically for a clients/
-// subdir — that's the unambiguous marker of the actual root, vs. real_osu/
-// which also has an osu!.exe and would falsely match if we treated osu!.exe as
-// a root marker.
-func resolveOsuRoot(start string) string {
-	dir := start
-	for i := 0; i < 6; i++ {
-		if dirExists(filepath.Join(dir, "clients")) {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return start
+	return filepath.Clean(ra) == filepath.Clean(rb)
 }
 
 func dirExists(p string) bool {
@@ -1027,62 +1032,6 @@ func dirExists(p string) bool {
 func fileExists(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && !info.IsDir()
-}
-
-// resolveClientsRootFromDir does the same walk-up but starting from an
-// arbitrary directory — used so OsuFolder can point at either the parent of
-// real_osu/ or at real_osu/ itself.
-func resolveClientsRootFromDir(start string) string {
-	dir := start
-	for i := 0; i < 6; i++ {
-		if filepath.Base(dir) == "clients" {
-			if info, err := os.Stat(dir); err == nil && info.IsDir() {
-				return dir
-			}
-		}
-		candidate := filepath.Join(dir, "clients")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return filepath.Join(start, "clients")
-}
-
-// scanClients returns subfolder names under <osuFolder>/clients/.
-// Falls back to walking up from PatcherPath when OsuFolder is not set, for the
-// manual-override case.
-func scanClients() (folders []string, root string) {
-	if osuDir := normalizePath(strings.TrimSpace(appSettings.OsuFolder)); osuDir != "" {
-		root = resolveClientsRootFromDir(osuDir)
-	} else {
-		patcher := normalizePath(strings.TrimSpace(appSettings.PatcherPath))
-		if patcher == "" {
-			return nil, ""
-		}
-		root = resolveClientsRoot(patcher)
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		fmt.Printf("[clients] cannot read %s: %v\n", root, err)
-		return nil, root
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		folders = append(folders, e.Name())
-	}
-	return folders, root
-}
-
-func clientHasOsuExe(root, name string) bool {
-	_, err := os.Stat(filepath.Join(root, name, "osu!.exe"))
-	return err == nil
 }
 
 // normalizePath strips a file:// prefix and percent-decodes the path so values
@@ -1320,7 +1269,7 @@ func buildButtonInspector(el *UIElement) []fyne.CanvasObject {
 	}
 	actionEntry := widget.NewEntry()
 	actionEntry.SetText(el.Action)
-	actionEntry.SetPlaceHolder("https://... or internal://launch | switch_server | switch_client")
+	actionEntry.SetPlaceHolder("https://... or internal://launch | internal://switch_server")
 	actionEntry.OnChanged = func(s string) { el.Action = s }
 	out := []fyne.CanvasObject{
 		labeledRow("X", float32Entry(el.X, func(v float32) { el.X = v })),
@@ -1549,16 +1498,6 @@ func showTemplatesPanel() {
 				Action: "internal://switch_server",
 			}
 		}},
-		{"Switch Client", func() *UIElement {
-			return &UIElement{
-				ID: nextID("btn_client"), Type: "button",
-				Text: "🎮  Switch Client", X: 60, Y: 410,
-				Width: 220, Height: 44, Opacity: 1.0,
-				ColorR: 90, ColorG: 60, ColorB: 140,
-				TextColorR: 255, TextColorG: 255, TextColorB: 255,
-				Action: "internal://switch_client",
-			}
-		}},
 		{"Top Plays", func() *UIElement {
 			return &UIElement{
 				ID:       nextID("topplays"),
@@ -1692,12 +1631,11 @@ var activeSettingsPage = "appearance"
 
 func buildSettingsScreen() {
 	pages := []settingsPage{
-		{"appearance", "Appearance", "Language, theme and editor access", theme.ColorPaletteIcon(), buildAppearancePage},
-		{"themes", "Themes", "Pick a preloaded look or apply your own", theme.GridIcon(), buildThemesPage},
-		{"account", "Account", "Connect your top plays via a private server API", theme.AccountIcon(), buildAccountPage},
-		{"server", "Server & Client", "osu! folder + which server / custom client gets launched", theme.ComputerIcon(), buildServerPage},
-		{"launch", "Launch Command", "Manually override how osu! is started", theme.MailForwardIcon(), buildLaunchPage},
-		{"credits", "Credits", "Who built this", theme.InfoIcon(), buildCreditsPage},
+		{"appearance", T("page_appearance"), T("page_appearance_sub"), theme.ColorPaletteIcon(), buildAppearancePage},
+		{"themes", T("page_themes"), T("page_themes_sub"), theme.GridIcon(), buildThemesPage},
+		{"account", T("page_account"), T("page_account_sub"), theme.AccountIcon(), buildAccountPage},
+		{"game", T("page_game"), T("page_game_sub"), theme.ComputerIcon(), buildGamePage},
+		{"credits", T("page_credits"), T("page_credits_sub"), theme.InfoIcon(), buildCreditsPage},
 	}
 
 	pageByKey := map[string]settingsPage{}
@@ -1735,7 +1673,7 @@ func buildSettingsScreen() {
 	// ── nav buttons ──
 	navItems := make([]fyne.CanvasObject, 0, len(pages)+1)
 	navItems = append(navItems,
-		canvas.NewText("SETTINGS", colorAccent),
+		canvas.NewText(strings.ToUpper(T("settings_title")), colorAccent),
 		widget.NewSeparator(),
 	)
 	for _, p := range pages {
@@ -1794,11 +1732,12 @@ func buildAppearancePage() fyne.CanvasObject {
 	userEntry := widget.NewEntry()
 	userEntry.SetText(appSettings.UserName)
 	userEntry.SetPlaceHolder("e.g. tazik — shown as the theme author when you share one")
-	userEntry.OnChanged = func(s string) { appSettings.UserName = s }
-	userSaveBtn := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+	// Auto-saved like every other field on these pages — a lone Save button here
+	// was the one place you could lose an edit by navigating away.
+	userEntry.OnChanged = func(s string) {
+		appSettings.UserName = s
 		saveAppSettings()
-		toastSaved("display name")
-	})
+	}
 
 	openEditorBtn := widget.NewButtonWithIcon(T("open_editor"), theme.DocumentCreateIcon(), switchToEditor)
 	openEditorBtn.Importance = widget.HighImportance
@@ -1809,16 +1748,15 @@ func buildAppearancePage() fyne.CanvasObject {
 	))
 
 	userCard := subCard(container.NewVBox(
-		fieldLabel("DISPLAY NAME"),
-		widget.NewLabel("Used as the author tag on themes you save with “Save as New Theme”."),
+		fieldLabel(strings.ToUpper(T("display_name"))),
+		widget.NewLabel(T("display_name_hint")),
 		userEntry,
-		container.NewHBox(userSaveBtn),
 	))
 
 	editorCard := subCard(container.NewVBox(
-		fieldLabel("UI EDITOR"),
-		widget.NewLabel("Customize the launcher layout — drag elements, add buttons, modules, top plays."),
-		openEditorBtn,
+		fieldLabel(strings.ToUpper(T("ui_editor"))),
+		widget.NewLabel(T("ui_editor_hint")),
+		container.NewHBox(openEditorBtn),
 	))
 
 	return container.NewVBox(langCard, userCard, editorCard)
@@ -1907,58 +1845,187 @@ func buildAccountPage() fyne.CanvasObject {
 	return container.NewVBox(quickCard, urlCard)
 }
 
-func buildServerPage() fyne.CanvasObject {
-	// ── osu! folder (preferred) ──
+func buildGamePage() fyne.CanvasObject {
+	// ── osu! folder ──
+	statusTxt := canvas.NewText("", colorTextMute)
+	statusTxt.TextSize = 11
+	statusTxt.TextStyle = fyne.TextStyle{Italic: true}
+
 	osuFolderEntry := widget.NewEntry()
+	osuFolderEntry.SetPlaceHolder(T("osu_folder_ph"))
 	osuFolderEntry.SetText(appSettings.OsuFolder)
-	osuFolderEntry.SetPlaceHolder("e.g. ~/.local/share/osu-wine/osu!  or  C:\\osu!")
-	// Auto-save on every keystroke so users can't get into the "I typed the
-	// path but forgot to hit Save" trap — Launch was failing for new users
-	// because of this. Path is normalised (file://, Windows /C:/ quirk, URI
-	// decode) on read, not on save, so we keep the raw text editable.
+
+	refreshFolderStatus := func() {
+		folder := normalizePath(strings.TrimSpace(appSettings.OsuFolder))
+		switch {
+		case folder == "":
+			statusTxt.Text = T("folder_none")
+			statusTxt.Color = colorTextMute
+		case !dirExists(folder):
+			statusTxt.Text = T("folder_missing")
+			statusTxt.Color = colorDanger
+		case !fileExists(filepath.Join(folder, osuExeName)):
+			statusTxt.Text = T("folder_no_exe")
+			statusTxt.Color = colorDanger
+		default:
+			statusTxt.Text = T("folder_ok")
+			statusTxt.Color = colorOk
+		}
+		statusTxt.Refresh()
+	}
+	refreshFolderStatus()
+
+	setFolder := func(path string) {
+		appSettings.OsuFolder = path
+		osuFolderEntry.SetText(path)
+		saveAppSettings()
+		refreshFolderStatus()
+	}
+
+	// Auto-save on every keystroke so nobody can land in the "typed the path,
+	// forgot to hit Save, Launch fails" trap. The raw text is kept as-is and
+	// normalised on read instead (file://, URI escapes, the Windows /C:/ quirk).
 	osuFolderEntry.OnChanged = func(s string) {
 		appSettings.OsuFolder = s
 		saveAppSettings()
+		refreshFolderStatus()
 	}
 
-	osuFolderBrowseBtn := widget.NewButtonWithIcon(T("browse_btn"), theme.FolderOpenIcon(), func() {
+	browseBtn := widget.NewButtonWithIcon(T("browse_btn"), theme.FolderOpenIcon(), func() {
 		dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
 			if err != nil || uri == nil {
 				return
 			}
-			// Normalise immediately on Windows so the displayed value matches
-			// what we'll actually use at launch time (no rogue leading slash).
-			appSettings.OsuFolder = normalizePath(uri.Path())
-			osuFolderEntry.SetText(appSettings.OsuFolder)
-			saveAppSettings()
+			setFolder(normalizePath(uri.Path()))
 		}, mainWindow)
 	})
-	osuFolderSaveBtn := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
-		saveAppSettings()
-		toastSaved("osu! folder")
+	detectBtn := widget.NewButtonWithIcon(T("autodetect_btn"), theme.SearchIcon(), func() {
+		found := detectOsuFolder()
+		if found == "" {
+			toast(toastOpts{level: modalWarn, message: T("autodetect_fail")})
+			return
+		}
+		setFolder(found)
+		toast(toastOpts{level: modalSuccess, message: "found " + found})
 	})
 
-	bundleStatus := canvas.NewText("bundled patcher: ✓ ready", color.NRGBA{R: 80, G: 215, B: 130, A: 255})
-	if !hasEmbeddedPatcher() {
-		bundleStatus.Text = "bundled patcher: ✕ missing — rebuild via build.sh"
-		bundleStatus.Color = color.NRGBA{R: 255, G: 130, B: 130, A: 255}
-	}
-	bundleStatus.TextSize = 11
-	bundleStatus.TextStyle = fyne.TextStyle{Italic: true}
-
-	osuCard := subCard(container.NewVBox(
-		fieldLabel("OSU! FOLDER"),
-		widget.NewLabel("The folder containing osu!.exe (and optionally clients/). The bundled patcher reads this to route launches."),
+	folderCard := subCard(container.NewVBox(
+		fieldLabel(T("osu_folder_label")),
+		widget.NewLabel(T("osu_folder_hint")),
 		osuFolderEntry,
-		container.NewHBox(osuFolderBrowseBtn, osuFolderSaveBtn),
-		bundleStatus,
+		container.NewHBox(browseBtn, detectBtn),
+		statusTxt,
 	))
 
-	// ── optional override ──
+	// ── server ──
+	customServerLabel := T("server_custom")
+
+	serverNames := make([]string, 0, len(serverPresets)+1)
+	for _, p := range serverPresets {
+		serverNames = append(serverNames, p.Name)
+	}
+	serverNames = append(serverNames, customServerLabel)
+
+	modeTxt := canvas.NewText("", colorTextMute)
+	modeTxt.TextSize = 11
+	refreshMode := func() {
+		if needsPatcher(currentServer()) {
+			modeTxt.Text = T("mode_patched")
+			modeTxt.Color = colorAccent
+		} else {
+			modeTxt.Text = T("mode_vanilla")
+			modeTxt.Color = colorTextMute
+		}
+		modeTxt.Refresh()
+	}
+
+	customServerEntry := widget.NewEntry()
+	customServerEntry.SetPlaceHolder("mysrv.example.com")
+
+	selectedName := customServerLabel
+	for _, p := range serverPresets {
+		if p.DevServer == currentServer() {
+			selectedName = p.Name
+			break
+		}
+	}
+	if selectedName == customServerLabel {
+		customServerEntry.SetText(currentServer())
+	} else {
+		customServerEntry.Hide()
+	}
+
+	serverSelect := widget.NewSelect(serverNames, nil)
+	serverSelect.SetSelected(selectedName)
+	serverSelect.OnChanged = func(name string) {
+		if name == customServerLabel {
+			customServerEntry.Show()
+			if v := strings.TrimSpace(customServerEntry.Text); v != "" {
+				appSettings.Server = v
+			}
+		} else {
+			customServerEntry.Hide()
+			for _, p := range serverPresets {
+				if p.Name == name {
+					appSettings.Server = p.DevServer
+					break
+				}
+			}
+		}
+		saveAppSettings()
+		refreshMode()
+	}
+	customServerEntry.OnChanged = func(s string) {
+		if serverSelect.Selected != customServerLabel {
+			return
+		}
+		appSettings.Server = strings.TrimSpace(s)
+		saveAppSettings()
+		refreshMode()
+	}
+	refreshMode()
+
+	launchBtn := widget.NewButtonWithIcon(T("launch_btn"), theme.MediaPlayIcon(), launchOsu)
+	launchBtn.Importance = widget.HighImportance
+
+	serverCard := subCard(container.NewVBox(
+		fieldLabel(T("server_label")),
+		serverSelect,
+		customServerEntry,
+		modeTxt,
+		widget.NewSeparator(),
+		container.NewHBox(launchBtn),
+	))
+
+	return container.NewVBox(folderCard, serverCard, buildAdvancedSection())
+}
+
+// buildAdvancedSection holds the escape hatches: a launch command that replaces
+// the pipeline outright, and a patcher exe for builds without a bundled one.
+// Collapsed by default — nobody needs these to play.
+func buildAdvancedSection() fyne.CanvasObject {
+	launchCmdEntry := widget.NewEntry()
+	launchCmdEntry.SetText(appSettings.LaunchCommand)
+	if runtime.GOOS == "windows" {
+		launchCmdEntry.SetPlaceHolder("leave empty to launch osu! normally")
+	} else {
+		launchCmdEntry.SetPlaceHolder("leave empty for auto (osu-wine → wine)")
+	}
+	launchCmdEntry.OnChanged = func(s string) {
+		appSettings.LaunchCommand = s
+		saveAppSettings()
+	}
+
+	examples := canvas.NewText("Examples:  osu-wine  |  lutris lutris:rungame/osu-stable", colorTextMute)
+	examples.TextSize = 10
+
 	patcherPathEntry := widget.NewEntry()
 	patcherPathEntry.SetText(appSettings.PatcherPath)
-	patcherPathEntry.SetPlaceHolder("(advanced) path to an external osu_patcher.exe")
-	patcherPathEntry.OnChanged = func(s string) { appSettings.PatcherPath = s }
+	patcherPathEntry.SetPlaceHolder("path to an externally built " + patcherFilename)
+	patcherPathEntry.OnChanged = func(s string) {
+		appSettings.PatcherPath = s
+		saveAppSettings()
+	}
 
 	patcherBrowseBtn := widget.NewButtonWithIcon(T("browse_btn"), theme.FolderOpenIcon(), func() {
 		fd := dialog.NewFileOpen(func(uc fyne.URIReadCloser, err error) {
@@ -1966,84 +2033,42 @@ func buildServerPage() fyne.CanvasObject {
 				return
 			}
 			defer uc.Close()
-			appSettings.PatcherPath = uc.URI().Path()
+			appSettings.PatcherPath = normalizePath(uc.URI().Path())
 			patcherPathEntry.SetText(appSettings.PatcherPath)
 			saveAppSettings()
 		}, mainWindow)
 		fd.SetFilter(storage.NewExtensionFileFilter([]string{".exe"}))
 		fd.Show()
 	})
-	patcherSaveBtn := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
-		saveAppSettings()
-		toastSaved("patcher path")
-	})
-	patcherClearBtn := widget.NewButtonWithIcon("Clear", theme.ContentClearIcon(), func() {
+	patcherClearBtn := widget.NewButtonWithIcon(T("clear_btn"), theme.ContentClearIcon(), func() {
 		appSettings.PatcherPath = ""
 		patcherPathEntry.SetText("")
 		saveAppSettings()
-		toast(toastOpts{level: modalSuccess, message: "patcher path cleared"})
 	})
 
-	overrideNote := canvas.NewText("Ignored when the bundled patcher is available.", colorTextMute)
-	overrideNote.TextSize = 10
-	overrideNote.TextStyle = fyne.TextStyle{Italic: true}
-
-	overrideCard := subCard(container.NewVBox(
-		fieldLabel("ADVANCED · CUSTOM PATCHER EXE"),
-		widget.NewLabel("Point at your own externally-built osu_patcher.exe. Only used when no bundled patcher is in this build."),
-		patcherPathEntry,
-		container.NewHBox(patcherBrowseBtn, patcherSaveBtn, patcherClearBtn),
-		overrideNote,
-	))
-
-	// ── server status + switchers ──
-	currentServerTxt := canvas.NewText(currentServerLabel(), colorAccent)
-	currentServerTxt.TextSize = 18
-	currentServerTxt.TextStyle = fyne.TextStyle{Bold: true}
-
-	pickServerBtn := widget.NewButtonWithIcon("Switch Server…", theme.ComputerIcon(), func() { showServerPicker() })
-	pickServerBtn.Importance = widget.HighImportance
-	pickClientBtn := widget.NewButtonWithIcon("Switch Client…", theme.MediaPlayIcon(), func() { showClientPicker() })
-
-	statusCard := subCard(container.NewVBox(
-		fieldLabel("CURRENT SERVER"),
-		currentServerTxt,
-		widget.NewSeparator(),
-		container.NewHBox(pickServerBtn, pickClientBtn),
-	))
-
-	return container.NewVBox(osuCard, statusCard, overrideCard)
-}
-
-func buildLaunchPage() fyne.CanvasObject {
-	launchCmdEntry := widget.NewEntry()
-	launchCmdEntry.SetText(appSettings.LaunchCommand)
-	if runtime.GOOS == "windows" {
-		launchCmdEntry.SetPlaceHolder("leave empty to use the Patcher / Game Path")
-	} else {
-		launchCmdEntry.SetPlaceHolder("leave empty for auto (Patcher exe → osu-wine → wine <path>)")
+	bundleStatus := canvas.NewText("bundled patcher: ✓ ready", colorOk)
+	if !hasEmbeddedPatcher() {
+		bundleStatus.Text = "bundled patcher: ✕ missing — rebuild via build.sh"
+		bundleStatus.Color = colorDanger
 	}
-	launchCmdEntry.OnChanged = func(s string) { appSettings.LaunchCommand = s }
+	bundleStatus.TextSize = 11
+	bundleStatus.TextStyle = fyne.TextStyle{Italic: true}
 
-	saveBtn := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
-		saveAppSettings()
-		toastSaved("launch command")
-	})
-	testBtn := widget.NewButtonWithIcon("Test launch", theme.MediaPlayIcon(), func() { launchOsu() })
-	testBtn.Importance = widget.HighImportance
-
-	examples := canvas.NewText("Examples:  osu-wine  |  wine ~/.local/share/osu-wine/osu!/osu!.exe  |  lutris lutris:rungame/osu-stable", colorTextMute)
-	examples.TextSize = 10
-
-	card := subCard(container.NewVBox(
-		fieldLabel("CUSTOM COMMAND"),
-		widget.NewLabel("Optional override — completely replaces the launch logic with whatever you type here."),
+	body := container.NewVBox(
+		fieldLabel(T("launch_cmd_label")),
+		widget.NewLabel(T("launch_cmd_hint")),
 		launchCmdEntry,
-		container.NewHBox(saveBtn, testBtn),
 		examples,
-	))
+		widget.NewSeparator(),
+		fieldLabel(T("patcher_exe_label")),
+		widget.NewLabel(T("patcher_exe_hint")),
+		patcherPathEntry,
+		container.NewHBox(patcherBrowseBtn, patcherClearBtn),
+		bundleStatus,
+	)
 
-	return container.NewVBox(card)
+	acc := widget.NewAccordion(widget.NewAccordionItem(T("advanced"), body))
+	return acc
 }
 
 func buildCreditsPage() fyne.CanvasObject {
@@ -2061,7 +2086,7 @@ func buildCreditsPage() fyne.CanvasObject {
 	}
 	return container.NewVBox(
 		person("taziksfear", "Main Developer", "https://github.com/taziksfear"),
-		person("SimplyAe", "Helped with UI and fixing the patcher bridge for additional clients", "https://github.com/SimplyAe"),
+		person("SimplyAe", "Helped with the UI and the patcher bridge", "https://github.com/SimplyAe"),
 	)
 }
 
@@ -2127,11 +2152,11 @@ const (
 func (l modalLevel) accent() color.NRGBA {
 	switch l {
 	case modalSuccess:
-		return color.NRGBA{R: 80, G: 215, B: 130, A: 255}
+		return colorOk
 	case modalError:
-		return color.NRGBA{R: 255, G: 80, B: 100, A: 255}
+		return colorDanger
 	case modalWarn:
-		return color.NRGBA{R: 245, G: 190, B: 70, A: 255}
+		return colorWarn
 	default:
 		return colorAccent
 	}
@@ -2426,9 +2451,24 @@ func openWebView(endpoint, title string, size fyne.Size) {
 	OpenEmbeddedWebView(endpoint, w, h)
 }
 
+// patcherTheme keeps Fyne's dark theme but swaps its blue highlight for the
+// launcher's pink accent, so primary buttons and the selected settings tab stop
+// clashing with everything else on screen.
+type patcherTheme struct{ fyne.Theme }
+
+func (t patcherTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	switch name {
+	case theme.ColorNamePrimary, theme.ColorNameFocus, theme.ColorNameHyperlink:
+		return colorAccent
+	case theme.ColorNameSelection:
+		return color.NRGBA{R: colorAccent.R, G: colorAccent.G, B: colorAccent.B, A: 90}
+	}
+	return t.Theme.Color(name, variant)
+}
+
 func main() {
 	currentApp = app.New()
-	currentApp.Settings().SetTheme(theme.DarkTheme())
+	currentApp.Settings().SetTheme(patcherTheme{Theme: theme.DarkTheme()})
 
 	mainWindow = currentApp.NewWindow("osu! launcher") // ну будем честны, это уже нихуя не патчер :3
 	mainWindow.Resize(fyne.NewSize(1100, 650))
@@ -2443,5 +2483,14 @@ func main() {
 	initDefaultTheme()
 
 	switchToLauncher()
+
+	// Startup decodes theme art and seeds preset themes, which roughly triples
+	// the heap for a moment. Hand that back rather than sitting on it for the
+	// rest of the session — this window is open while the game runs.
+	go func() {
+		time.Sleep(2 * time.Second)
+		debug.FreeOSMemory()
+	}()
+
 	mainWindow.ShowAndRun()
 }

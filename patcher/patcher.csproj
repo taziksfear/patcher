@@ -4,9 +4,9 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net6.0</TargetFramework>
     <RootNamespace>osu_patcher</RootNamespace>
-    <!-- Output named "osu!.exe" so the Go launcher can drop it into the
-         osu folder as the front-line executable that osu-wine launches. -->
-    <AssemblyName>osu!</AssemblyName>
+    <!-- Dropped next to the user's untouched osu!.exe; it launches the game and
+         injects, so it must never share the game's filename. -->
+    <AssemblyName>osu_patcher</AssemblyName>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
     <UseWindowsForms>false</UseWindowsForms>

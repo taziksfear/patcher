@@ -69,24 +69,6 @@
       "text_color_g": 240,
       "text_color_b": 240,
       "corner_radius": 15
-    },
-    {
-      "id": "btn_client_4",
-      "type": "button",
-      "text": "🎮  Switch Client",
-      "action": "internal://switch_client",
-      "x": 857,
-      "y": 587,
-      "width": 220,
-      "height": 44,
-      "opacity": 1,
-      "color_r": 90,
-      "color_g": 20,
-      "color_b": 30,
-      "text_color_r": 255,
-      "text_color_g": 240,
-      "text_color_b": 240,
-      "corner_radius": 15
     }
   ]
 }

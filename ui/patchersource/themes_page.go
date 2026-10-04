@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"image/color"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,10 +26,10 @@ func promptSaveAsNewTheme() {
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("e.g. Aqua, MyDark, Sunset")
 
-	form := dialog.NewForm("Save as New Theme",
-		"Save", "Cancel",
+	form := dialog.NewForm(T("save_as_new_title"),
+		T("save"), T("cancel"),
 		[]*widget.FormItem{
-			{Text: "Theme name", Widget: entry},
+			{Text: T("theme_name"), Widget: entry},
 		},
 		func(ok bool) {
 			if !ok {
@@ -41,7 +40,7 @@ func promptSaveAsNewTheme() {
 				notifyError(err)
 				return
 			}
-			toast(toastOpts{level: modalSuccess, message: "Saved as: " + name})
+			toast(toastOpts{level: modalSuccess, message: fmt.Sprintf(T("theme_saved"), name)})
 		},
 		mainWindow,
 	)
@@ -222,30 +221,27 @@ func copyFile(src, dst string) error {
 func buildThemesPage() fyne.CanvasObject {
 	currentName := activeTheme.Name
 
-	intro := canvas.NewText("Pick a preloaded design or stick with your own custom one. Applying overwrites the current Active Theme — your in-editor work will be replaced.", colorTextMute)
-	intro.TextSize = 11
-
 	// Where-on-disk card: drop themes here, share themes from here.
 	pathTxt := canvas.NewText(themesRoot, colorTextStrng)
 	pathTxt.TextSize = 11
-	openBtn := widget.NewButtonWithIcon("Open folder", theme.FolderOpenIcon(), func() {
+	openBtn := widget.NewButtonWithIcon(T("open_folder"), theme.FolderOpenIcon(), func() {
 		if err := openInFileManager(themesRoot); err != nil {
 			notifyError(err)
 		}
 	})
 	locationCard := subCard(container.NewVBox(
-		fieldLabel("THEMES FOLDER"),
-		widget.NewLabel("Drop downloaded theme folders here. Your saved themes also live here — share them by zipping the folder."),
+		fieldLabel(strings.ToUpper(T("themes_folder"))),
+		widget.NewLabel(T("themes_folder_hint")),
 		pathTxt,
 		container.NewHBox(openBtn),
 	))
 
 	var cards []fyne.CanvasObject
-	cards = append(cards, intro, locationCard, widget.NewSeparator())
+	cards = append(cards, locationCard, widget.NewSeparator())
 
 	themes := listInstalledThemes()
 	if len(themes) == 0 {
-		cards = append(cards, widget.NewLabel("No themes installed yet. Use the editor's “Save as New Theme” to make one."))
+		cards = append(cards, widget.NewLabel(T("no_themes")))
 	}
 	for _, t := range themes {
 		t := t
@@ -266,7 +262,7 @@ func themeCard(t installedTheme, isActive bool) fyne.CanvasObject {
 	if author == "" {
 		author = "—"
 	}
-	authorTxt := canvas.NewText("made by "+author, colorAccent)
+	authorTxt := canvas.NewText(T("made_by")+" "+author, colorAccent)
 	authorTxt.TextSize = 11
 	authorTxt.TextStyle = fyne.TextStyle{Italic: true}
 
@@ -276,17 +272,21 @@ func themeCard(t installedTheme, isActive bool) fyne.CanvasObject {
 	descLbl := widget.NewLabel(t.Cfg.Description)
 	descLbl.Wrapping = fyne.TextWrapWord
 
-	// Preview thumbnail — use icon.jpg if present, else bg.jpg.
+	// Preview thumbnail — use icon.jpg if present, else bg.jpg. Decoded down to
+	// thumbnail size first: the source art is wallpaper-resolution and every
+	// installed theme gets a card on this page.
 	var thumb fyne.CanvasObject
 	for _, candidate := range []string{"icon.jpg", "bg.jpg", "icon.png", "bg.png"} {
 		p := filepath.Join(t.Dir, candidate)
-		if _, err := os.Stat(p); err == nil {
-			img := canvas.NewImageFromFile(p)
-			img.FillMode = canvas.ImageFillContain
-			img.SetMinSize(fyne.NewSize(96, 96))
-			thumb = img
-			break
+		decoded := thumbnail(p, 192, 192)
+		if decoded == nil {
+			continue
 		}
+		img := canvas.NewImageFromImage(decoded)
+		img.FillMode = canvas.ImageFillContain
+		img.SetMinSize(fyne.NewSize(96, 96))
+		thumb = img
+		break
 	}
 	if thumb == nil {
 		ph := canvas.NewRectangle(colorPanel)
@@ -295,10 +295,10 @@ func themeCard(t installedTheme, isActive bool) fyne.CanvasObject {
 	}
 
 	// Apply button
-	applyBtn := widget.NewButtonWithIcon("Apply", theme.ConfirmIcon(), func() {
-		confirmModal("Apply theme",
-			fmt.Sprintf("Apply '%s'? Your current Active Theme will be replaced — any unsaved editor work is lost.", t.Cfg.Name),
-			"Apply", func() {
+	applyBtn := widget.NewButtonWithIcon(T("apply"), theme.ConfirmIcon(), func() {
+		confirmModal(T("apply_theme_title"),
+			fmt.Sprintf(T("apply_theme_msg"), t.Cfg.Name),
+			T("apply"), func() {
 				if err := applyInstalledTheme(t.Folder); err != nil {
 					notifyError(err)
 					return
@@ -311,12 +311,14 @@ func themeCard(t installedTheme, isActive bool) fyne.CanvasObject {
 
 	var actions fyne.CanvasObject
 	if isActive {
-		activeTag := canvas.NewText("✓ ACTIVE", color.NRGBA{R: 80, G: 215, B: 130, A: 255})
+		activeTag := canvas.NewText(T("active_badge"), colorOk)
 		activeTag.TextSize = 11
 		activeTag.TextStyle = fyne.TextStyle{Bold: true}
-		actions = container.NewVBox(activeTag, applyBtn)
+		applyBtn.SetText(T("apply") + " again")
+		applyBtn.Importance = widget.MediumImportance
+		actions = container.NewHBox(activeTag, applyBtn)
 	} else {
-		actions = container.NewVBox(applyBtn)
+		actions = container.NewHBox(applyBtn)
 	}
 
 	rightCol := container.NewVBox(titleBlock, descLbl, actions)
